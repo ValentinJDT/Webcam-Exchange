@@ -85,11 +85,15 @@ android {
         versionCode 1
         versionName "1.0"
 
-        externalNativeBuild {
-            cmake {
-                arguments "-DCMAKE_MAKE_PROGRAM=C:\\ninja\\ninja.exe", "-DCMAKE_OBJECT_PATH_MAX=1024"
+        if(file("C:/ninja/ninja.exe").exists()) {
+            externalNativeBuild {
+                cmake {
+                    arguments "-DCMAKE_MAKE_PROGRAM=C:\\ninja\\ninja.exe", "-DCMAKE_OBJECT_PATH_MAX=1024"
+                }
             }
         }
+
+
     }
     signingConfigs {
         debug {
