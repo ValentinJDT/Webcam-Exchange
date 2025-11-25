@@ -2,6 +2,7 @@ import React from 'react';
 import { Text, Platform } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NavigationContainer } from '@react-navigation/native';
+import Ionicons from '@react-native-vector-icons/ionicons';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { StatusBar } from 'react-native';
 import ServerScreenTCP from './ServerScreenTCP';
@@ -47,7 +48,7 @@ function Tabs() {
         options={{
           tabBarLabel: 'Serveur',
           tabBarIcon: ({ color, size }) => (
-            <TabIcon emoji="🎥" color={color} />
+            <Ionicons name="desktop-outline" size={size} color={color} />
           ),
           headerTitle: 'Serveur TCP',
         }}
@@ -56,11 +57,11 @@ function Tabs() {
         name="Client"
         component={ClientScreenTCP}
         options={{
-          tabBarLabel: 'Viewer',
+          tabBarLabel: 'Client',
           tabBarIcon: ({ color, size }) => (
-            <TabIcon emoji="📱" color={color} />
+            <Ionicons name="videocam-outline" size={size} color={color} />
           ),
-          headerTitle: 'Viewer TCP',
+          headerTitle: 'Client TCP',
         }}
       />
     </Tab.Navigator>
@@ -75,14 +76,5 @@ export default function App() {
         <Tabs />
       </NavigationContainer>
     </SafeAreaProvider>
-  );
-}
-
-// Composant helper pour les icônes emoji dans les tabs
-function TabIcon({ emoji, color }: { emoji: string; color: string }) {
-  return (
-    <Text style={{ fontSize: 24, color }}>
-      {emoji}
-    </Text>
   );
 }

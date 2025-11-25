@@ -15,11 +15,14 @@ import {
   RTCPeerConnection,
   RTCSessionDescription,
   RTCIceCandidate,
+  mediaDevices,
   RTCView,
   MediaStream,
 } from 'react-native-webrtc';
 import TcpSocket from 'react-native-tcp-socket';
-import { Ionicons } from '@react-native-vector-icons/ionicons';
+import Ionicons from '@react-native-vector-icons/ionicons';
+import ViewShot, { captureRef } from 'react-native-view-shot';
+import RNFS from 'react-native-fs';
 
 const configuration = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }],
@@ -31,6 +34,8 @@ export default function ClientScreenTCP() {
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [facingMode, setFacingMode] = useState<'front' | 'environment'>('environment');
   const [showLogs, setShowLogs] = useState(false);
   const [logs, setLogs] = useState<Array<{ time: string; type: string; message: string }>>([]);
 
@@ -38,6 +43,7 @@ export default function ClientScreenTCP() {
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const bufferRef = useRef<string>('');
   const scrollViewRef = useRef<ScrollView>(null);
+  const viewShotRef = useRef<any>(null);
 
   const addLog = (type: string, message: string) => {
     const time = new Date().toLocaleTimeString();
@@ -94,12 +100,15 @@ export default function ClientScreenTCP() {
               console.log('[TCP Client] Message reçu:', response.type);
               addLog('info', `📨 Réponse reçue: ${response.type}`);
 
-              if (response.type === 'answer') {
-                handleAnswer(response.answer, response.candidates);
-              } else if (response.type === 'error') {
-                addLog('error', `❌ Erreur serveur: ${response.error}`);
-                throw new Error(response.error);
-              }
+                if (response.type === 'answer') {
+                  handleAnswer(response.answer, response.candidates);
+                } else if (response.type === 'photo_saved') {
+                  addLog('success', `✅ Photo sauvegardée sur le serveur: ${response.path}`);
+                  Alert.alert('Photo sauvegardée', `Serveur: ${response.path}`);
+                } else if (response.type === 'error') {
+                  addLog('error', `❌ Erreur serveur: ${response.error}`);
+                  throw new Error(response.error);
+                }
             }
           }
         } catch (error: any) {
@@ -145,19 +154,32 @@ export default function ClientScreenTCP() {
       const peerConnection = new RTCPeerConnection(configuration);
       peerConnectionRef.current = peerConnection;
 
-      // Gérer le stream distant
+      // 1. Obtenir le flux local (caméra) et l'ajouter aux senders
+      try {
+        const stream = await mediaDevices.getUserMedia({
+          video: {
+            facingMode: 'environment',
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        });
+        setLocalStream(stream);
+        stream.getTracks().forEach((track: any) => peerConnection.addTrack(track, stream));
+        addLog('info', '📹 Flux local ajouté');
+      } catch (err: any) {
+        console.error('[TCP Client] Impossible d accéder à la caméra:', err);
+        addLog('error', `❌ Permission caméra: ${err.message}`);
+        Alert.alert('Erreur', 'Impossible d accéder à la caméra');
+        setConnecting(false);
+        socket.destroy();
+        return;
+      }
+
+      // (Optionnel) gérer le stream distant si le serveur renverra quelque chose
       (peerConnection as any).ontrack = (event: any) => {
-        console.log('[TCP Client] Stream reçu, streams count:', event.streams?.length);
-        addLog('success', '✅ Stream vidéo reçu!');
         if (event.streams && event.streams[0]) {
-          console.log('[TCP Client] Setting remote stream');
-          addLog('info', '📺 Affichage du stream...');
           setRemoteStream(event.streams[0]);
-          setConnecting(false);
-          setConnected(true);
-        } else {
-          console.log('[TCP Client] No stream in event');
-          addLog('warning', "⚠️ Pas de stream dans l'événement");
         }
       };
 
@@ -190,10 +212,8 @@ export default function ClientScreenTCP() {
       // 3. Créer une offre
       console.log("[TCP Client] Création de l'offre...");
       addLog('info', "📝 Création de l'offre WebRTC...");
-      const offer = await peerConnection.createOffer({
-        offerToReceiveVideo: true,
-        offerToReceiveAudio: false,
-      });
+      // Créer une offre (nous envoyons désormais le flux local)
+      const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
 
       // Attendre la collecte des candidats ICE
@@ -236,6 +256,8 @@ export default function ClientScreenTCP() {
 
       console.log('[TCP Client] Connexion WebRTC établie!');
       addLog('success', '✅ Connexion WebRTC établie!');
+      setConnecting(false);
+      setConnected(true);
     } catch (error: any) {
       console.error("[TCP Client] Erreur lors de l'application de la réponse:", error);
       addLog('error', `❌ Erreur réponse: ${error.message}`);
@@ -262,27 +284,97 @@ export default function ClientScreenTCP() {
   };
 
   const capturePhoto = async () => {
-    if (Platform.OS === 'android') {
-      try {
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
-          {
-            title: 'Permission stockage',
-            message: "L'application a besoin d'accès au stockage pour sauvegarder des photos",
-            buttonPositive: 'OK',
-          },
-        );
-        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
-          Alert.alert('Permission requise', "L'accès au stockage est nécessaire");
-          return;
-        }
-      } catch (err) {
-        Alert.alert('Erreur', 'Impossible de demander la permission de stockage');
+    try {
+      if (!localStream) {
+        Alert.alert('Erreur', 'Aucun flux vidéo disponible');
         return;
       }
-    }
 
-    Alert.alert('Capture', 'Fonction de capture en cours de développement');
+      addLog('info', '📸 Capture en cours...');
+
+      // Utiliser captureRef pour capturer la vue RTCView
+      // On capture directement depuis le viewShotRef
+      if (!viewShotRef.current) {
+        throw new Error('Référence de vue non disponible');
+      }
+
+      // Capturer avec une qualité maximale
+      const uri = await captureRef(viewShotRef, {
+        format: 'jpg',
+        quality: 1.0,
+        result: 'tmpfile', // Sauvegarder temporairement comme fichier
+      });
+
+      // Lire le fichier en base64
+      const base64 = await RNFS.readFile(uri, 'base64');
+      
+      // Supprimer le fichier temporaire
+      await RNFS.unlink(uri).catch(() => {});
+
+      console.log('[Client] Capture réussie, taille:', base64.length, 'caractères');
+      console.log('[Client] Premiers caractères:', base64.substring(0, 50));
+
+      const filename = `photo_${Date.now()}.jpg`;
+
+      // Envoyer au serveur via le socket TCP
+      if (!socketRef.current) {
+        Alert.alert('Erreur', "Pas de connexion au serveur");
+        return;
+      }
+
+      addLog('info', `📤 Envoi de la photo (${filename}) au serveur...`);
+      const message = JSON.stringify({ type: 'photo', filename, data: base64 });
+      socketRef.current.write(message + '\n');
+
+      addLog('success', `✅ Photo envoyée: ${filename}`);
+      Alert.alert('Photo envoyée', 'La photo a été envoyée au serveur');
+    } catch (err: any) {
+      console.error('[TCP Client] capturePhoto error', err);
+      addLog('error', `❌ Erreur capture: ${err?.message || err}`);
+      Alert.alert('Erreur', `Impossible de capturer la photo: ${err?.message || err}`);
+    }
+  };
+
+  const toggleCamera = async () => {
+    if (!peerConnectionRef.current) return;
+    try {
+      const newFacing = facingMode === 'front' ? 'environment' : 'front';
+      addLog('info', `🔁 Changement caméra → ${newFacing}`);
+
+      const newStream = await mediaDevices.getUserMedia({
+        video: {
+          facingMode: newFacing,
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      });
+
+      const videoTrack = newStream.getVideoTracks()[0];
+      const pc = peerConnectionRef.current;
+      const sender = pc.getSenders().find((s: any) => s.track?.kind === 'video');
+
+      if (sender) {
+        // Replace the outgoing track with the new camera track
+        await sender.replaceTrack(videoTrack);
+        addLog('success', '✅ Piste vidéo remplacée');
+      } else {
+        pc.addTrack(videoTrack, newStream);
+        addLog('success', '✅ Piste vidéo ajoutée');
+      }
+
+      // Stop previous local tracks
+      if (localStream) {
+        localStream.getTracks().forEach((t: any) => t.stop());
+      }
+
+      setLocalStream(newStream);
+      setFacingMode(newFacing);
+    } catch (err: any) {
+      console.error('[TCP Client] toggleCamera error', err);
+      addLog('error', `❌ Erreur changement caméra: ${err?.message || err}`);
+      Alert.alert('Erreur', `Impossible de changer de caméra: ${err?.message || err}`);
+    }
   };
 
   return (
@@ -321,12 +413,12 @@ export default function ClientScreenTCP() {
             <View style={styles.infoBox}>
               <Text style={styles.infoTitle}>💡 Comment se connecter?</Text>
               <Text style={styles.infoText}>
-                1. Le serveur doit avoir démarré le streaming{'\n'}
-                2. Demandez l'adresse IP du serveur{'\n'}
-                3. Entrez l'IP ci-dessus{'\n'}
-                4. Appuyez sur "Se Connecter"{'\n'}
-                5. Le stream démarrera automatiquement!
-              </Text>
+                  1. Le serveur doit avoir démarré{"\n"}
+                  2. Demandez l'adresse IP du serveur{"\n"}
+                  3. Entrez l'IP ci-dessus{"\n"}
+                  4. Appuyez sur "Se Connecter"{"\n"}
+                  5. Le client commencera à envoyer son flux automatiquement
+                </Text>
             </View>
 
             <View style={styles.exampleBox}>
@@ -421,29 +513,27 @@ export default function ClientScreenTCP() {
             </View>
           )}
         </View>
-      ) : (
-        <View style={styles.streamContainer}>
-          {remoteStream ? (
-            <RTCView
-              streamURL={remoteStream.toURL()}
-              style={styles.streamView}
-              objectFit="contain"
-              mirror={false}
-            />
+          ) : (
+            <View style={styles.streamContainer}>
+          {/* The server does not send a stream; show local camera fullscreen */}
+          {localStream ? (
+            <ViewShot ref={viewShotRef} options={{ result: 'base64', format: 'jpg', quality: 0.9 }} style={{ flex: 1 }}>
+              <RTCView
+                streamURL={localStream.toURL()}
+                style={styles.streamView}
+                objectFit="cover"
+                mirror={facingMode === 'front'}
+              />
+            </ViewShot>
           ) : (
             <View style={styles.waitingContainer}>
               <ActivityIndicator size="large" color="#fff" />
-              <Text style={styles.waitingText}>En attente du stream...</Text>
+              <Text style={styles.waitingText}>En attente du flux local...</Text>
             </View>
           )}
 
           <View style={styles.overlayControls}>
             <View style={styles.statusBar}>
-              <View style={styles.liveIndicator}>
-                <View style={styles.liveDot} />
-                <Text style={styles.liveText}>EN DIRECT</Text>
-              </View>
-
               <View style={styles.ipDisplay}>
                 <Text style={styles.ipDisplayText}>
                   📡 {serverIP}:{serverPort}
@@ -460,6 +550,14 @@ export default function ClientScreenTCP() {
                 accessibilityLabel="Capturer la photo"
               >
                 <Ionicons name="camera-outline" size={20} color="#fff" />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.controlButton]}
+                onPress={toggleCamera}
+                accessibilityLabel="Changer la caméra"
+              >
+                <Ionicons name="camera-reverse-outline" size={20} color="#fff" />
               </TouchableOpacity>
 
               <TouchableOpacity
@@ -852,4 +950,5 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#333',
   },
+  // local preview removed: we show localStream fullscreen instead
 });

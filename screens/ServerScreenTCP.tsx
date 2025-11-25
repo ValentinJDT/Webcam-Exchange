@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, Alert, ScrollView, Animated, PermissionsAndroid, Platform } from 'react-native';
-import { Ionicons } from '@react-native-vector-icons/ionicons';
+import { StyleSheet, Text, View, TouchableOpacity, Alert, ScrollView, Animated, PermissionsAndroid, Platform, ActivityIndicator } from 'react-native';
+import Ionicons from '@react-native-vector-icons/ionicons';
 import {
   RTCPeerConnection,
   RTCIceCandidate,
@@ -9,6 +9,7 @@ import {
   MediaStream,
 } from 'react-native-webrtc';
 import Clipboard from '@react-native-clipboard/clipboard';
+import RNFS from 'react-native-fs';
 import { NetworkInfo } from 'react-native-network-info';
 import TcpSocket from 'react-native-tcp-socket';
 
@@ -22,13 +23,15 @@ interface Client {
   socket: any;
   peerConnection: RTCPeerConnection;
   iceCandidates: RTCIceCandidate[];
+  remoteStream?: MediaStream | null;
 }
 
 export default function ServerScreenTCP() {
   // We'll request platform permissions manually (PermissionsAndroid on Android).
   const [streaming, setStreaming] = useState(false);
-  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  // server no longer captures or sends its own local stream
   const [ipAddress, setIpAddress] = useState('');
+  const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [facingMode, setFacingMode] = useState<'front' | 'environment'>('environment');
   const [serverStarted, setServerStarted] = useState(false);
   const [connectedClients, setConnectedClients] = useState(0);
@@ -42,6 +45,7 @@ export default function ServerScreenTCP() {
   const serverRef = useRef<any>(null);
   const clientsRef = useRef<Map<string, Client>>(new Map());
   const scrollViewRef = useRef<ScrollView>(null);
+  const [clientsVersion, setClientsVersion] = useState(0);
 
   const addLog = (type: string, message: string) => {
     const time = new Date().toLocaleTimeString();
@@ -58,43 +62,7 @@ export default function ServerScreenTCP() {
     };
   }, []);
 
-  const requestCameraPermission = async () => {
-    if (Platform.OS === 'android') {
-      try {
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.CAMERA,
-          {
-            title: 'Permission caméra',
-            message: "L'application a besoin d'accès à la caméra pour streamer",
-            buttonPositive: 'OK',
-          },
-        );
-        return granted === PermissionsAndroid.RESULTS.GRANTED;
-      } catch (err) {
-        return false;
-      }
-    }
-    return true;
-  };
-
-  const requestMediaPermission = async () => {
-    if (Platform.OS === 'android') {
-      try {
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
-          {
-            title: 'Permission stockage',
-            message: "L'application a besoin d'accès au stockage pour sauvegarder des photos",
-            buttonPositive: 'OK',
-          },
-        );
-        return granted === PermissionsAndroid.RESULTS.GRANTED;
-      } catch (err) {
-        return false;
-      }
-    }
-    return true;
-  };
+  // server does not request camera/media permissions anymore
 
   const showTooltip = (text: string, duration = 3000) => {
     setTooltipText(text);
@@ -129,7 +97,7 @@ export default function ServerScreenTCP() {
     }
   };
 
-  const startSignalingServer = async (stream: MediaStream) => {
+  const startSignalingServer = async () => {
     try {
       addLog('info', '🚀 Démarrage du serveur TCP...');
       const server = TcpSocket.createServer((socket: any) => {
@@ -156,7 +124,10 @@ export default function ServerScreenTCP() {
                 addLog('info', `📨 Offre reçue de ${clientId.split(':')[0]}`);
 
                 if (request.type === 'offer') {
-                  await handleOffer(clientId, socket, request.offer, request.candidates, stream);
+                  await handleOffer(clientId, socket, request.offer, request.candidates);
+                } else if (request.type === 'photo') {
+                  // Photo (base64) reçu du client
+                  await handlePhoto(clientId, socket, request.filename, request.data);
                 }
               }
             }
@@ -203,6 +174,92 @@ export default function ServerScreenTCP() {
     }
   };
 
+  const handlePhoto = async (clientId: string, socket: any, filename: string, base64Data: string) => {
+    try {
+      addLog('info', `📥 Photo reçue de ${clientId.split(':')[0]} — sauvegarde...`);
+
+      // Utiliser le répertoire Pictures pour que les photos soient visibles dans la galerie
+      let appDir: string;
+      
+      if (Platform.OS === 'android') {
+        // Android: Utiliser Pictures/WebcamExchange (visible dans la galerie)
+        const picturesPath = RNFS.PicturesDirectoryPath || `${RNFS.ExternalStorageDirectoryPath}/Pictures`;
+        appDir = `${picturesPath}/WebcamExchange`;
+      } else {
+        // iOS: Utiliser le répertoire Documents
+        appDir = `${RNFS.DocumentDirectoryPath}/WebcamExchange`;
+      }
+      
+      console.log('Répertoire cible:', appDir);
+      
+      // Vérifier et créer le répertoire avec gestion d'erreur robuste
+      try {
+        const dirExists = await RNFS.exists(appDir).catch(() => false);
+        console.log('Le répertoire existe:', dirExists);
+        
+        if (!dirExists) {
+          console.log('Création du répertoire...');
+          await RNFS.mkdir(appDir).catch((err) => {
+            console.warn('Erreur mkdir (peut-être déjà existant):', err);
+          });
+        }
+      } catch (dirError) {
+        console.warn('Erreur lors de la vérification/création du répertoire:', dirError);
+        // Continuer quand même, le répertoire existe peut-être
+      }
+      
+      const filePath = `${appDir}/${filename}`;
+      console.log('Chemin complet du fichier:', filePath);
+      console.log('Taille des données reçues:', base64Data?.length || 0, 'caractères');
+      console.log('Premier caractères:', base64Data?.substring(0, 50));
+      
+      // Nettoyer les données base64 (enlever le préfixe data: si présent)
+      let cleanBase64 = base64Data;
+      if (base64Data.startsWith('data:')) {
+        const base64Index = base64Data.indexOf('base64,');
+        if (base64Index !== -1) {
+          cleanBase64 = base64Data.substring(base64Index + 7);
+          console.log('Préfixe data: détecté et retiré');
+        }
+      }
+      
+      console.log('Taille des données nettoyées:', cleanBase64?.length || 0, 'caractères');
+
+      // Écrire le fichier avec gestion d'erreur robuste
+      let writeSuccess = false;
+      try {
+        await RNFS.writeFile(filePath, cleanBase64, 'base64').catch((writeErr) => {
+          console.error('Erreur writeFile brute:', writeErr);
+          throw new Error(`Échec d'écriture: ${writeErr?.message || writeErr || 'inconnu'}`);
+        });
+        writeSuccess = true;
+        console.log('Photo sauvegardée avec succès');
+      } catch (writeError: any) {
+        console.error('Erreur lors de l\'écriture:', writeError);
+        throw new Error(`Impossible de sauvegarder: ${writeError?.message || 'erreur d\'écriture'}`);
+      }
+
+      if (!writeSuccess) {
+        throw new Error('Échec de sauvegarde sans erreur explicite');
+      }
+
+      addLog('success', `✅ Photo sauvegardée: ${filePath}`);
+
+      // Répondre au client
+      socket.write(JSON.stringify({ type: 'photo_saved', path: filePath }) + '\n');
+    } catch (error: any) {
+      const errorMessage = error?.message || 'Erreur de sauvegarde inconnue';
+      console.error('[TCP Server] handlePhoto error:', error);
+      addLog('error', `❌ Erreur sauvegarde photo: ${errorMessage}`);
+      
+      try {
+        socket.write(JSON.stringify({ type: 'error', error: errorMessage }) + '\n');
+      } catch (writeErr) {
+        console.error('[TCP Server] Impossible d\'envoyer l\'erreur au client:', writeErr);
+      }
+    }
+  };
+
   const stopSignalingServer = () => {
     if (serverRef.current) {
       serverRef.current.close();
@@ -225,19 +282,10 @@ export default function ServerScreenTCP() {
     socket: any,
     offer: any,
     candidates: any[],
-    stream: MediaStream,
   ) => {
     try {
       const peerConnection = new RTCPeerConnection(configuration);
       const iceCandidates: RTCIceCandidate[] = [];
-
-      // Ajouter le stream local
-      console.log('[TCP Server] Adding local stream tracks:', stream.getTracks().length);
-      addLog('info', `📹 Ajout du stream (${stream.getTracks().length} tracks)`);
-      stream.getTracks().forEach((track: any) => {
-        console.log('[TCP Server] Adding track:', track.kind, track.enabled);
-        peerConnection.addTrack(track, stream);
-      });
 
       // Collecter les candidats ICE
       (peerConnection as any).onicecandidate = (event: any) => {
@@ -246,6 +294,26 @@ export default function ServerScreenTCP() {
           iceCandidates.push(event.candidate);
         }
       };
+
+      // Gérer les tracks entrants (flux envoyés par le client)
+      (peerConnection as any).ontrack = (event: any) => {
+        console.log('[TCP Server] Track reçu de', clientId, 'streams:', event.streams?.length);
+        addLog('success', `✅ Flux reçu de ${clientId.split(':')[0]}`);
+        if (event.streams && event.streams[0]) {
+          const client = clientsRef.current.get(clientId);
+          if (client) {
+            client.remoteStream = event.streams[0];
+            clientsRef.current.set(clientId, client);
+            setConnectedClients(clientsRef.current.size);
+                setClientsVersion((v) => v + 1);
+          }
+          // If no client selected, auto-select the first
+          if (!selectedClientId) {
+            setSelectedClientId(clientId);
+          }
+        }
+      };
+
 
       // Gérer les changements de connexion
       (peerConnection as any).onconnectionstatechange = () => {
@@ -262,12 +330,14 @@ export default function ServerScreenTCP() {
         }
       };
 
-      // Stocker le client
+      // Stocker le client (remoteStream sera rempli par ontrack)
       clientsRef.current.set(clientId, {
         socket,
         peerConnection,
         iceCandidates,
+        remoteStream: null,
       });
+
 
       // Définir l'offre distante
       await peerConnection.setRemoteDescription(offer);
@@ -312,104 +382,30 @@ export default function ServerScreenTCP() {
       client.socket.destroy();
       clientsRef.current.delete(clientId);
       setConnectedClients(clientsRef.current.size);
+      setClientsVersion((v) => v + 1);
+      if (selectedClientId === clientId) setSelectedClientId(null);
     }
   };
 
   const startStreaming = async () => {
-    const camGranted = await requestCameraPermission();
-    if (!camGranted) {
-      Alert.alert('Permission refusée', "L'accès à la caméra est nécessaire");
-      return;
-    }
-
-    const mediaGranted = await requestMediaPermission();
-    if (!mediaGranted) {
-      // On continue, mais avertir l'utilisateur si nécessaire
-      addLog('warning', "⚠️ Permission stockage non accordée (si vous sauvegardez des photos)");
-    }
-
     try {
-      // 1. D'ABORD obtenir le stream de la caméra
-      addLog('info', '📹 Démarrage de la caméra...');
-      const stream = await mediaDevices.getUserMedia({
-        video: {
-          facingMode: facingMode,
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-        audio: false,
-      });
-
-      console.log('[Server] Camera stream obtained, tracks:', stream.getTracks().length);
-      addLog('success', `✅ Caméra démarrée (${stream.getTracks().length} tracks)`);
-      setLocalStream(stream);
+      addLog('info', '🚀 Démarrage du serveur signaling...');
+      await startSignalingServer();
       setStreaming(true);
-
-      // 2. ENSUITE démarrer le serveur TCP signaling avec le stream
-      await startSignalingServer(stream);
-
-      Alert.alert(
-        'Streaming démarré! 🎥',
-        `Les clients peuvent se connecter à:\n${ipAddress}:${SIGNALING_PORT}`,
-        [{ text: 'OK' }],
-      );
+      Alert.alert('Serveur démarré', `Les clients peuvent se connecter à:\n${ipAddress}:${SIGNALING_PORT}`);
     } catch (error: any) {
-      Alert.alert('Erreur', `Impossible de démarrer: ${error.message}`);
-      console.error(error);
       addLog('error', `❌ Erreur démarrage: ${error.message}`);
-      stopSignalingServer();
+      Alert.alert('Erreur', `Impossible de démarrer: ${error.message}`);
     }
   };
 
   const stopStreaming = () => {
-    // Arrêter le stream local
-    if (localStream) {
-      localStream.getTracks().forEach((track: any) => track.stop());
-      setLocalStream(null);
-    }
-
     // Arrêter le serveur signaling
     stopSignalingServer();
-
     setStreaming(false);
   };
 
-  const toggleCamera = async () => {
-    if (!streaming || !localStream) return;
-
-    const newFacingMode = facingMode === 'environment' ? 'front' : 'environment';
-
-    try {
-      // Arrêter l'ancien stream
-      localStream.getTracks().forEach((track: any) => track.stop());
-
-      // Obtenir un nouveau stream
-      const newStream = await mediaDevices.getUserMedia({
-        video: {
-          facingMode: newFacingMode,
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-        audio: false,
-      });
-
-      // Remplacer les tracks dans toutes les connexions peer
-      clientsRef.current.forEach((client) => {
-        const videoTrack = newStream.getVideoTracks()[0];
-        const sender = client.peerConnection
-          .getSenders()
-          .find((s: any) => s.track?.kind === 'video');
-        if (sender) {
-          sender.replaceTrack(videoTrack);
-        }
-      });
-
-      setLocalStream(newStream);
-      setFacingMode(newFacingMode);
-    } catch (error: any) {
-      Alert.alert('Erreur', `Impossible de changer de caméra: ${error.message}`);
-    }
-  };
+  // toggleCamera removed: server no longer sends its own stream
 
   return (
     <View style={styles.container}>
@@ -426,16 +422,16 @@ export default function ServerScreenTCP() {
           </View>
 
           <TouchableOpacity style={styles.startButton} onPress={startStreaming}>
-            <Text style={styles.startButtonText}>🎥 Démarrer le Streaming</Text>
+            <Text style={styles.startButtonText}>🔌 Démarrer le serveur</Text>
           </TouchableOpacity>
 
           <View style={styles.instructionsCard}>
             <Text style={styles.instructionsTitle}>💡 Instructions:</Text>
             <Text style={styles.instructionsText}>
-              1. Appuyez sur "Démarrer le Streaming"{'\n'}
+              1. Appuyez sur "Démarrer le serveur"{'\n'}
               2. Communiquez votre IP aux clients{'\n'}
               3. Les clients se connectent automatiquement{'\n'}
-              4. Le stream démarre instantanément!
+              4. Les clients commenceront à envoyer leur flux automatiquement
             </Text>
           </View>
 
@@ -477,46 +473,80 @@ export default function ServerScreenTCP() {
         </ScrollView>
       ) : (
         <View style={styles.streamingContainer}>
-          {localStream && (
-            <RTCView
-              streamURL={localStream.toURL()}
-              style={styles.preview}
-              objectFit="cover"
-              mirror={facingMode === 'front'}
-            />
-          )}
+          {/* Display selected client's stream (server no longer sends its own stream) */}
+          {
+            (() => {
+              const client = selectedClientId ? clientsRef.current.get(selectedClientId) : null;
+              const stream = client?.remoteStream || null;
+              if (stream) {
+                return (
+                  <RTCView
+                    streamURL={stream.toURL()}
+                    style={styles.preview}
+                    objectFit="cover"
+                    mirror={false}
+                  />
+                );
+              }
+
+              return (
+                <View style={styles.preview}>
+                  <View style={styles.waitingContainer}>
+                    <ActivityIndicator size="large" color="#fff" />
+                    <Text style={styles.waitingText}>En attente du flux client...</Text>
+                  </View>
+                </View>
+              );
+            })()
+          }
 
           <View style={styles.overlay}>
               <View style={styles.topBanner}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <View style={styles.liveDot} />
-                  <Text style={styles.topBannerText}>EN DIRECT</Text>
-                </View>
+                    <TouchableOpacity
+                      onPress={() => {
+                        try {
+                          const text = `${ipAddress}:${SIGNALING_PORT}`;
+                          Clipboard.setString(text);
+                          addLog('success', `📋 IP copiée: ${text}`);
+                          showTooltip(`IP copiée: ${text}`);
+                        } catch (err: any) {
+                          addLog('error', `❌ Impossible de copier l'IP: ${err.message}`);
+                          Alert.alert('Erreur', `Impossible de copier l'IP: ${err.message}`);
+                        }
+                      }}
+                    >
+                      <Text style={styles.topBannerText}>📡 {ipAddress}:{SIGNALING_PORT}</Text>
+                    </TouchableOpacity>
 
-                <TouchableOpacity
-                  onPress={() => {
-                    try {
-                      const text = `${ipAddress}:${SIGNALING_PORT}`;
-                      Clipboard.setString(text);
-                      addLog('success', `📋 IP copiée: ${text}`);
-                      showTooltip(`IP copiée: ${text}`);
-                    } catch (err: any) {
-                      addLog('error', `❌ Impossible de copier l'IP: ${err.message}`);
-                      Alert.alert('Erreur', `Impossible de copier l'IP: ${err.message}`);
-                    }
-                  }}
-                >
-                  <Text style={styles.topBannerText}>📡 {ipAddress}:{SIGNALING_PORT}</Text>
-                </TouchableOpacity>
+                    <Text style={styles.topBannerText}>👥 {connectedClients}</Text>
+                  </View>
 
-                <Text style={styles.topBannerText}>👥 {connectedClients}</Text>
-              </View>
+            {/* Client selector row */}
+            <View style={styles.clientSelector}>
+              <ScrollView horizontal contentContainerStyle={{ paddingHorizontal: 12 }}>
+                {Array.from(clientsRef.current.keys()).length === 0 ? (
+                  <Text style={{ color: '#fff', padding: 8 }}>Aucun client connecté</Text>
+                ) : (
+                  Array.from(clientsRef.current.keys()).map((id) => (
+                    <TouchableOpacity
+                      key={id}
+                      onPress={() => setSelectedClientId(id)}
+                      style={{
+                        paddingHorizontal: 10,
+                        paddingVertical: 6,
+                        marginRight: 8,
+                        backgroundColor: selectedClientId === id ? '#1976D2' : 'rgba(255,255,255,0.06)',
+                        borderRadius: 8,
+                      }}
+                    >
+                      <Text style={{ color: '#fff', fontWeight: '600' }}>{id.split(':')[0]}</Text>
+                    </TouchableOpacity>
+                  ))
+                )}
+              </ScrollView>
+            </View>
 
             <View style={styles.controls}>
-              <TouchableOpacity style={[styles.controlButton, { backgroundColor: '#2196F3' }]} onPress={toggleCamera} accessibilityLabel="Changer caméra">
-                <Ionicons name="camera-reverse-outline" size={22} color="#fff" />
-              </TouchableOpacity>
-
               <TouchableOpacity style={[styles.controlButton, { backgroundColor: '#757575' }]} onPress={() => setShowLogs(!showLogs)} accessibilityLabel="Afficher les logs">
                 <Ionicons name="document-text-outline" size={20} color="#fff" />
               </TouchableOpacity>
@@ -524,7 +554,7 @@ export default function ServerScreenTCP() {
               <TouchableOpacity
                 style={[styles.controlButton, styles.stopButton]}
                 onPress={stopStreaming}
-                accessibilityLabel="Arrêter le streaming"
+                accessibilityLabel="Arrêter le serveur"
               >
                 <Ionicons name="stop-circle-outline" size={22} color="#fff" />
               </TouchableOpacity>
@@ -901,5 +931,23 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 12,
     fontWeight: '600',
+  },
+  waitingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#000',
+  },
+  waitingText: {
+    marginTop: 15,
+    fontSize: 16,
+    color: '#fff',
+  },
+  clientSelector: {
+    position: 'absolute',
+    top: 64,
+    left: 0,
+    right: 0,
+    zIndex: 40,
   },
 });
