@@ -38,6 +38,7 @@ export default function ClientScreenTCP() {
   const bufferRef = useRef<string>('');
   const scrollViewRef = useRef<ScrollView>(null);
   const cameraRef = useRef<Camera>(null);
+  const touchCountRef = useRef(0);
 
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice(facingMode);
@@ -174,7 +175,18 @@ export default function ClientScreenTCP() {
     addLog('info', `🔁 Caméra ${facingMode === 'back' ? 'avant' : 'arrière'}`);
   };
 
+  const handleTouchStart = (e: GestureResponderEvent) => {
+    touchCountRef.current = e.nativeEvent.touches.length;
+  };
+
   const handleFocus = async (e: GestureResponderEvent) => {
+    // Ignorer si c'était un geste multi-touch (zoom)
+    if (touchCountRef.current > 1) {
+      touchCountRef.current = 0;
+      return;
+    }
+    touchCountRef.current = 0;
+    
     if (!cameraRef.current || !device?.supportsFocus) return;
     const { locationX: x, locationY: y } = e.nativeEvent;
     setFocusPoint({ x, y });
@@ -287,20 +299,21 @@ export default function ClientScreenTCP() {
     <View style={styles.cameraContainer}>
       <StatusBar hidden />
       {device ? (
-        <Pressable style={StyleSheet.absoluteFill} onPress={handleFocus}>
+        <View style={StyleSheet.absoluteFill} onTouchStart={handleTouchStart} onTouchEnd={handleFocus}>
           <Camera
             ref={cameraRef}
             style={StyleSheet.absoluteFill}
             device={device}
+            photoHdr={true}
             isActive={true}
             photo={true}
             enableZoomGesture={true}
             onInitialized={() => setCameraReady(true)}
           />
           {focusPoint && (
-            <View style={[styles.focusIndicator, { left: focusPoint.x - 30, top: focusPoint.y - 30 }]} />
+            <View style={[styles.focusIndicator, { left: focusPoint.x - 30, top: focusPoint.y - 30 }]} pointerEvents="none" />
           )}
-        </Pressable>
+        </View>
       ) : (
         <View style={styles.noCameraContainer}>
           <Ionicons name="camera-outline" size={64} color="#666" />

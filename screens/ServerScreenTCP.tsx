@@ -8,6 +8,7 @@ import {
   ScrollView,
   Platform,
   PermissionsAndroid,
+  Modal,
 } from 'react-native';
 import Ionicons from '@react-native-vector-icons/ionicons';
 import Clipboard from '@react-native-clipboard/clipboard';
@@ -18,7 +19,14 @@ import TcpSocket from 'react-native-tcp-socket';
 import SideNavBar from '../components/SideNavBar';
 import LogViewer, { LogEntry } from '../components/LogViewer';
 import InfoBox from '../components/InfoBox';
-import { useLandscapeMode, getPhotosDirectory, createLogEntry } from '../utils/helpers';
+import { 
+  useLandscapeMode, 
+  getPhotosDirectoryByType, 
+  getPhotosFolderPreference, 
+  setPhotosFolderPreference,
+  PhotosFolderType,
+  createLogEntry 
+} from '../utils/helpers';
 
 const PORT = 4747;
 
@@ -29,6 +37,8 @@ export default function ServerScreenTCP() {
   const [photosReceived, setPhotosReceived] = useState(0);
   const [showLogs, setShowLogs] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [showSettings, setShowSettings] = useState(false);
+  const [photosFolder, setPhotosFolder] = useState<PhotosFolderType>('downloads');
 
   const serverRef = useRef<any>(null);
   const clientsRef = useRef<Set<any>>(new Set());
@@ -42,8 +52,21 @@ export default function ServerScreenTCP() {
 
   useEffect(() => {
     getIPAddress();
+    loadPhotosFolderPreference();
     return () => stopServer();
   }, []);
+
+  const loadPhotosFolderPreference = async () => {
+    const pref = await getPhotosFolderPreference();
+    setPhotosFolder(pref);
+  };
+
+  const handleFolderChange = async (folder: PhotosFolderType) => {
+    setPhotosFolder(folder);
+    await setPhotosFolderPreference(folder);
+    setShowSettings(false);
+    addLog('info', `📁 Dossier changé: ${folder === 'downloads' ? 'Téléchargements' : 'Images'}/Cirly`);
+  };
 
   const getIPAddress = async () => {
     try {
@@ -154,7 +177,7 @@ export default function ServerScreenTCP() {
   const handlePhoto = async (socket: any, filename: string, base64Data: string) => {
     try {
       addLog('info', `📥 Photo reçue: ${filename}`);
-      const appDir = getPhotosDirectory();
+      const appDir = getPhotosDirectoryByType(photosFolder);
       
       if (!(await RNFS.exists(appDir).catch(() => false))) {
         await RNFS.mkdir(appDir);
@@ -221,6 +244,66 @@ export default function ServerScreenTCP() {
     </View>
   );
 
+  // Settings Modal
+  const renderSettingsModal = () => (
+    <Modal
+      visible={showSettings}
+      transparent
+      animationType="fade"
+      onRequestClose={() => setShowSettings(false)}
+    >
+      <TouchableOpacity
+        style={styles.modalOverlay}
+        activeOpacity={1}
+        onPress={() => setShowSettings(false)}
+      >
+        <View style={styles.modalContent}>
+          <Text style={styles.modalTitle}>Dossier de destination</Text>
+          
+          <TouchableOpacity
+            style={[styles.folderOption, photosFolder === 'downloads' && styles.folderOptionSelected]}
+            onPress={() => handleFolderChange('downloads')}
+          >
+            <Ionicons 
+              name="download-outline" 
+              size={24} 
+              color={photosFolder === 'downloads' ? '#1976D2' : '#666'} 
+            />
+            <View style={styles.folderOptionText}>
+              <Text style={[styles.folderOptionTitle, photosFolder === 'downloads' && styles.folderOptionTitleSelected]}>
+                Téléchargements
+              </Text>
+              <Text style={styles.folderOptionPath}>Downloads/Cirly</Text>
+            </View>
+            {photosFolder === 'downloads' && (
+              <Ionicons name="checkmark-circle" size={24} color="#1976D2" />
+            )}
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.folderOption, photosFolder === 'pictures' && styles.folderOptionSelected]}
+            onPress={() => handleFolderChange('pictures')}
+          >
+            <Ionicons 
+              name="images-outline" 
+              size={24} 
+              color={photosFolder === 'pictures' ? '#1976D2' : '#666'} 
+            />
+            <View style={styles.folderOptionText}>
+              <Text style={[styles.folderOptionTitle, photosFolder === 'pictures' && styles.folderOptionTitleSelected]}>
+                Images
+              </Text>
+              <Text style={styles.folderOptionPath}>Pictures/Cirly</Text>
+            </View>
+            {photosFolder === 'pictures' && (
+              <Ionicons name="checkmark-circle" size={24} color="#1976D2" />
+            )}
+          </TouchableOpacity>
+        </View>
+      </TouchableOpacity>
+    </Modal>
+  );
+
   // Landscape layout
   const renderLandscape = () => (
     <View style={styles.landscapeContainer}>
@@ -250,6 +333,10 @@ export default function ServerScreenTCP() {
           <StatCard icon="people-outline" value={connectedClients} label={`Client${connectedClients !== 1 ? 's' : ''}`} color="#2196F3" disabled={!serverStarted} />
           <StatCard icon="images-outline" value={photosReceived} label={`Photo${photosReceived !== 1 ? 's' : ''}`} color="#4CAF50" disabled={!serverStarted} />
         </View>
+
+        <TouchableOpacity style={styles.settingsButtonLandscape} onPress={() => setShowSettings(true)}>
+          <Ionicons name="ellipsis-vertical-outline" size={22} color="#666" />
+        </TouchableOpacity>
       </View>
 
       <InfoBox title="💡 Comment ça marche ?" variant="orange" isLandscape>
@@ -264,6 +351,9 @@ export default function ServerScreenTCP() {
   const renderPortrait = () => (
     <ScrollView style={styles.content} contentContainerStyle={styles.scrollContent}>
       <View style={styles.ipCard}>
+        <TouchableOpacity style={styles.settingsButton} onPress={() => setShowSettings(true)}>
+          <Ionicons name="ellipsis-vertical-outline" size={22} color="#1976D2" />
+        </TouchableOpacity>
         <Text style={styles.ipLabel}>Adresse du serveur</Text>
         <TouchableOpacity onPress={copyIpToClipboard}>
           <Text style={styles.ipAddress}>{ipAddress}:{PORT}</Text>
@@ -300,6 +390,7 @@ export default function ServerScreenTCP() {
         {isLandscape ? renderLandscape() : renderPortrait()}
       </View>
       {isLandscape && <SideNavBar />}
+      {renderSettingsModal()}
     </View>
   );
 }
@@ -313,10 +404,14 @@ const styles = StyleSheet.create({
   scrollContent: { padding: 20, paddingBottom: 40, flexGrow: 1, justifyContent: 'center' },
 
   // IP Card
-  ipCard: { backgroundColor: '#E3F2FD', borderRadius: 15, padding: 20, alignItems: 'center', marginBottom: 20 },
+  ipCard: { backgroundColor: '#E3F2FD', borderRadius: 15, padding: 20, alignItems: 'center', marginBottom: 20, position: 'relative' },
   ipLabel: { fontSize: 14, color: '#1976D2', marginBottom: 8 },
   ipAddress: { fontSize: 22, fontWeight: 'bold', color: '#0D47A1' },
   ipHint: { fontSize: 12, color: '#64B5F6', marginTop: 8 },
+
+  // Settings Button
+  settingsButton: { position: 'absolute', top: 10, right: 10, padding: 8 },
+  settingsButtonLandscape: { padding: 10, backgroundColor: '#fff', borderRadius: 10, elevation: 1 },
 
   // Server Button
   serverButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#4CAF50', padding: 18, borderRadius: 15, marginBottom: 20, elevation: 5 },
@@ -329,6 +424,17 @@ const styles = StyleSheet.create({
   statCardDisabled: { backgroundColor: '#f0f0f0' },
   statValue: { fontSize: 28, fontWeight: 'bold', color: '#333', marginTop: 8 },
   statLabel: { fontSize: 12, color: '#666', marginTop: 4 },
+
+  // Modal
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
+  modalContent: { backgroundColor: '#fff', borderRadius: 16, padding: 20, width: '85%', maxWidth: 350 },
+  modalTitle: { fontSize: 18, fontWeight: 'bold', color: '#333', marginBottom: 20, textAlign: 'center' },
+  folderOption: { flexDirection: 'row', alignItems: 'center', padding: 15, borderRadius: 12, marginBottom: 10, backgroundColor: '#f5f5f5' },
+  folderOptionSelected: { backgroundColor: '#E3F2FD', borderWidth: 2, borderColor: '#1976D2' },
+  folderOptionText: { flex: 1, marginLeft: 12 },
+  folderOptionTitle: { fontSize: 16, fontWeight: '600', color: '#333' },
+  folderOptionTitleSelected: { color: '#1976D2' },
+  folderOptionPath: { fontSize: 12, color: '#888', marginTop: 2 },
 
   // Landscape
   landscapeContainer: { flex: 1, padding: 15, justifyContent: 'center' },

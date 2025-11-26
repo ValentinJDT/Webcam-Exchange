@@ -1,7 +1,8 @@
-import React, { useState, useCallback, useRef, useEffect, memo } from 'react';
+import React, { useState, useCallback, useRef, useEffect, memo, useMemo } from 'react';
 import {
   StyleSheet, Text, View, FlatList, Image, TouchableOpacity,
-  Alert, Modal, ActivityIndicator, StatusBar, Pressable, Dimensions,
+  Alert, Modal, ActivityIndicator, StatusBar, Dimensions,
+  Animated, PanResponder, Pressable,
 } from 'react-native';
 import RNFS from 'react-native-fs';
 import Ionicons from '@react-native-vector-icons/ionicons';
@@ -9,9 +10,226 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import SideNavBar from '../components/SideNavBar';
-import { useLandscapeMode, getPhotosDirectory } from '../utils/helpers';
+import { useLandscapeMode, getPhotosDirectoryByType, getPhotosFolderPreference } from '../utils/helpers';
 
 interface Photo { path: string; name: string; mtime: Date }
+
+// Composant image zoomable avec Animated et PanResponder
+interface ZoomableImageProps {
+  uri: string;
+  width: number;
+  height: number;
+  onTap: () => void;
+  onZoomChange: (isZoomed: boolean) => void;
+}
+
+const ZoomableImage = memo(({ uri, width, height, onTap, onZoomChange }: ZoomableImageProps) => {
+  // Animated values
+  const scaleAnim = useRef(new Animated.Value(1)).current;
+  const translateXAnim = useRef(new Animated.Value(0)).current;
+  const translateYAnim = useRef(new Animated.Value(0)).current;
+  
+  // État mutable pour le tracking
+  const stateRef = useRef({
+    scale: 1,
+    translateX: 0,
+    translateY: 0,
+    lastTap: 0,
+    // Pinch
+    isPinching: false,
+    pinchStartDistance: 0,
+    pinchStartScale: 1,
+    // Pan
+    panStartX: 0,
+    panStartY: 0,
+  });
+
+  // Reset quand l'image change
+  useEffect(() => {
+    stateRef.current = {
+      scale: 1,
+      translateX: 0,
+      translateY: 0,
+      lastTap: 0,
+      isPinching: false,
+      pinchStartDistance: 0,
+      pinchStartScale: 1,
+      panStartX: 0,
+      panStartY: 0,
+    };
+    scaleAnim.setValue(1);
+    translateXAnim.setValue(0);
+    translateYAnim.setValue(0);
+    onZoomChange(false);
+  }, [uri]);
+
+  const clamp = useCallback((value: number, min: number, max: number) => 
+    Math.max(min, Math.min(max, value)), []);
+
+  const getMaxTranslate = useCallback((currentScale: number) => ({
+    x: Math.max(0, (width * (currentScale - 1)) / 2),
+    y: Math.max(0, (height * (currentScale - 1)) / 2),
+  }), [width, height]);
+
+  const getDistance = useCallback((touches: any[]) => {
+    if (!touches || touches.length < 2) return 0;
+    const [t1, t2] = touches;
+    const dx = t1.pageX - t2.pageX;
+    const dy = t1.pageY - t2.pageY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }, []);
+
+  const panResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: (evt) => {
+      const touches = evt.nativeEvent.touches;
+      // Toujours capturer si 2 doigts
+      if (touches.length >= 2) return true;
+      // Capturer si zoomé
+      return stateRef.current.scale > 1;
+    },
+    onPanResponderTerminationRequest: (evt) => {
+      const touches = evt.nativeEvent.touches;
+      // Ne jamais lâcher si pinch ou zoomé
+      if (touches.length >= 2 || stateRef.current.isPinching || stateRef.current.scale > 1) {
+        return false;
+      }
+      return true;
+    },
+    onShouldBlockNativeResponder: () => false,
+
+    onPanResponderGrant: (evt) => {
+      const touches = evt.nativeEvent.touches;
+      const state = stateRef.current;
+      
+      if (touches.length >= 2) {
+        state.isPinching = true;
+        state.pinchStartDistance = getDistance(touches);
+        state.pinchStartScale = state.scale;
+      } else {
+        state.panStartX = state.translateX;
+        state.panStartY = state.translateY;
+      }
+    },
+
+    onPanResponderMove: (evt, gestureState) => {
+      const touches = evt.nativeEvent.touches;
+      const state = stateRef.current;
+
+      if (touches.length >= 2) {
+        // PINCH ZOOM
+        const distance = getDistance(touches);
+        
+        if (!state.isPinching || state.pinchStartDistance === 0) {
+          // Premier frame du pinch
+          state.isPinching = true;
+          state.pinchStartDistance = distance;
+          state.pinchStartScale = state.scale;
+          return;
+        }
+
+        const ratio = distance / state.pinchStartDistance;
+        const newScale = clamp(state.pinchStartScale * ratio, 1, 5);
+        
+        state.scale = newScale;
+        scaleAnim.setValue(newScale);
+
+        // Contraindre la translation
+        const max = getMaxTranslate(newScale);
+        state.translateX = clamp(state.translateX, -max.x, max.x);
+        state.translateY = clamp(state.translateY, -max.y, max.y);
+        translateXAnim.setValue(state.translateX);
+        translateYAnim.setValue(state.translateY);
+        
+      } else if (touches.length === 1) {
+        // Transition pinch -> pan
+        if (state.isPinching) {
+          state.isPinching = false;
+          state.pinchStartDistance = 0;
+          state.panStartX = state.translateX;
+          state.panStartY = state.translateY;
+          return;
+        }
+
+        // PAN (seulement si zoomé)
+        if (state.scale > 1) {
+          const max = getMaxTranslate(state.scale);
+          const newX = clamp(state.panStartX + gestureState.dx, -max.x, max.x);
+          const newY = clamp(state.panStartY + gestureState.dy, -max.y, max.y);
+          
+          state.translateX = newX;
+          state.translateY = newY;
+          translateXAnim.setValue(newX);
+          translateYAnim.setValue(newY);
+        }
+      }
+    },
+
+    onPanResponderRelease: (evt, gestureState) => {
+      const state = stateRef.current;
+      const wasPinching = state.isPinching;
+      
+      state.isPinching = false;
+      state.pinchStartDistance = 0;
+      onZoomChange(state.scale > 1);
+
+      // Ignorer les taps si c'était un pinch ou mouvement
+      if (wasPinching) return;
+      if (Math.abs(gestureState.dx) > 10 || Math.abs(gestureState.dy) > 10) return;
+
+      // Double tap detection
+      const now = Date.now();
+      if (now - state.lastTap < 300) {
+        state.lastTap = 0;
+        
+        if (state.scale > 1) {
+          // Reset zoom
+          Animated.parallel([
+            Animated.timing(scaleAnim, { toValue: 1, duration: 200, useNativeDriver: true }),
+            Animated.timing(translateXAnim, { toValue: 0, duration: 200, useNativeDriver: true }),
+            Animated.timing(translateYAnim, { toValue: 0, duration: 200, useNativeDriver: true }),
+          ]).start(() => {
+            state.scale = 1;
+            state.translateX = 0;
+            state.translateY = 0;
+            onZoomChange(false);
+          });
+        } else {
+          // Zoom in
+          Animated.timing(scaleAnim, { toValue: 2.5, duration: 200, useNativeDriver: true }).start(() => {
+            state.scale = 2.5;
+            onZoomChange(true);
+          });
+        }
+      } else {
+        state.lastTap = now;
+        setTimeout(() => {
+          if (state.lastTap === now) {
+            onTap();
+          }
+        }, 300);
+      }
+    },
+  }), [width, height, onTap, onZoomChange, clamp, getDistance, getMaxTranslate, scaleAnim, translateXAnim, translateYAnim]);
+
+  return (
+    <View style={{ width, height, justifyContent: 'center', alignItems: 'center' }} {...panResponder.panHandlers}>
+      <Animated.Image
+        source={{ uri }}
+        style={{
+          width,
+          height,
+          transform: [
+            { translateX: translateXAnim },
+            { translateY: translateYAnim },
+            { scale: scaleAnim },
+          ],
+        }}
+        resizeMode="contain"
+      />
+    </View>
+  );
+});
 
 // Composant modal séparé et mémorisé pour éviter les re-rendus
 interface FullscreenModalProps {
@@ -25,6 +243,7 @@ interface FullscreenModalProps {
 const FullscreenModal = memo(({ visible, photos, initialIndex, onClose, onDelete }: FullscreenModalProps) => {
   const [showControls, setShowControls] = useState(true);
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
+  const [isZoomed, setIsZoomed] = useState(false);
   const insets = useSafeAreaInsets();
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flatListRef = useRef<FlatList>(null);
@@ -36,6 +255,7 @@ const FullscreenModal = memo(({ visible, photos, initialIndex, onClose, onDelete
     if (visible) {
       setCurrentIndex(initialIndex);
       setShowControls(true);
+      setIsZoomed(false);
       hideTimer.current = setTimeout(() => setShowControls(false), 3000);
       return () => {
         if (hideTimer.current) clearTimeout(hideTimer.current);
@@ -60,6 +280,10 @@ const FullscreenModal = memo(({ visible, photos, initialIndex, onClose, onDelete
     });
   }, []);
 
+  const handleZoomChange = useCallback((zoomed: boolean) => {
+    setIsZoomed(zoomed);
+  }, []);
+
   const onViewableItemsChanged = useRef(({ viewableItems }: any) => {
     if (viewableItems.length > 0) {
       setCurrentIndex(viewableItems[0].index ?? 0);
@@ -75,14 +299,14 @@ const FullscreenModal = memo(({ visible, photos, initialIndex, onClose, onDelete
   }), [width]);
 
   const renderItem = useCallback(({ item }: { item: Photo }) => (
-    <Pressable style={{ width, height, justifyContent: 'center', alignItems: 'center' }} onPress={handlePress}>
-      <Image
-        source={{ uri: `file://${item.path}` }}
-        style={{ width, height }}
-        resizeMode="contain"
-      />
-    </Pressable>
-  ), [width, height, handlePress]);
+    <ZoomableImage
+      uri={`file://${item.path}`}
+      width={width}
+      height={height}
+      onTap={handlePress}
+      onZoomChange={handleZoomChange}
+    />
+  ), [width, height, handlePress, handleZoomChange]);
 
   if (!visible || photos.length === 0) return null;
 
@@ -98,6 +322,7 @@ const FullscreenModal = memo(({ visible, photos, initialIndex, onClose, onDelete
           keyExtractor={item => item.path}
           horizontal
           pagingEnabled
+          scrollEnabled={!isZoomed}
           showsHorizontalScrollIndicator={false}
           initialScrollIndex={initialIndex}
           getItemLayout={getItemLayout}
@@ -144,7 +369,8 @@ export default function GalleryScreen() {
   const loadPhotos = async () => {
     setLoading(true);
     try {
-      const dir = getPhotosDirectory();
+      const folderPref = await getPhotosFolderPreference();
+      const dir = getPhotosDirectoryByType(folderPref);
       if (!(await RNFS.exists(dir))) { setPhotos([]); return; }
       const files = await RNFS.readDir(dir);
       setPhotos(
