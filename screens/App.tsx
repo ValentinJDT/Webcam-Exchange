@@ -1,69 +1,51 @@
 import React from 'react';
-import { Text, Platform } from 'react-native';
+import { Platform } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NavigationContainer } from '@react-navigation/native';
-import Ionicons from '@react-native-vector-icons/ionicons';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { StatusBar } from 'react-native';
+import Ionicons from '@react-native-vector-icons/ionicons';
+
 import ServerScreenTCP from './ServerScreenTCP';
 import ClientScreenTCP from './ClientScreenTCP';
+import GalleryScreen from './GalleryScreen';
+import { useLandscapeMode } from '../utils/helpers';
 
 const Tab = createBottomTabNavigator();
 
+const SCREENS = [
+  { name: 'Server', component: ServerScreenTCP, label: 'Serveur', icon: 'desktop-outline' },
+  { name: 'Client', component: ClientScreenTCP, label: 'Client', icon: 'camera-outline' },
+  { name: 'Gallery', component: GalleryScreen, label: 'Galerie', icon: 'images-outline' },
+] as const;
+
 function Tabs() {
   const insets = useSafeAreaInsets();
-
-  const bottomPadding = insets.bottom > 0 ? insets.bottom : (Platform.OS === 'android' ? 20 : 5);
-  const barHeight = Platform.OS === 'android' ? 60 + insets.bottom : 60;
+  const { isLandscape } = useLandscapeMode();
 
   return (
     <Tab.Navigator
       screenOptions={{
+        headerShown: false,
         tabBarActiveTintColor: '#2196F3',
         tabBarInactiveTintColor: '#757575',
-        tabBarStyle: {
-          backgroundColor: '#fff',
-          borderTopWidth: 1,
-          borderTopColor: '#e0e0e0',
-          paddingBottom: bottomPadding,
-          paddingTop: 5,
-          height: barHeight,
-        },
-        tabBarLabelStyle: {
-          fontSize: 12,
-          fontWeight: '600',
-        },
-        headerStyle: {
-          backgroundColor: '#2196F3',
-        },
-        headerTintColor: '#fff',
-        headerTitleStyle: {
-          fontWeight: 'bold',
-        },
+        tabBarStyle: isLandscape 
+          ? { display: 'none' } 
+          : { backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#e0e0e0', paddingBottom: insets.bottom, height: 56 + insets.bottom },
+        tabBarLabelStyle: { fontSize: 12, fontWeight: '600' },
+        tabBarItemStyle: { justifyContent: 'center' },
       }}
     >
-      <Tab.Screen
-        name="Server"
-        component={ServerScreenTCP}
-        options={{
-          tabBarLabel: 'Serveur',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="desktop-outline" size={size} color={color} />
-          ),
-          headerTitle: 'Serveur TCP',
-        }}
-      />
-      <Tab.Screen
-        name="Client"
-        component={ClientScreenTCP}
-        options={{
-          tabBarLabel: 'Client',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="videocam-outline" size={size} color={color} />
-          ),
-          headerTitle: 'Client TCP',
-        }}
-      />
+      {SCREENS.map(({ name, component, label, icon }) => (
+        <Tab.Screen
+          key={name}
+          name={name}
+          component={component}
+          options={{
+            tabBarLabel: label,
+            tabBarIcon: ({ color, size }) => <Ionicons name={icon} size={size} color={color} />,
+          }}
+        />
+      ))}
     </Tab.Navigator>
   );
 }
@@ -71,7 +53,6 @@ function Tabs() {
 export default function App() {
   return (
     <SafeAreaProvider>
-      <StatusBar barStyle="dark-content" />
       <NavigationContainer>
         <Tabs />
       </NavigationContainer>
