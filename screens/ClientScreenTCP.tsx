@@ -8,848 +8,422 @@ import {
   Alert,
   ActivityIndicator,
   ScrollView,
-  PermissionsAndroid,
-  Platform,
+  StatusBar,
+  Pressable,
+  GestureResponderEvent,
 } from 'react-native';
-import {
-  RTCPeerConnection,
-  RTCSessionDescription,
-  RTCIceCandidate,
-  RTCView,
-  MediaStream,
-} from 'react-native-webrtc';
 import TcpSocket from 'react-native-tcp-socket';
-import { Ionicons } from '@react-native-vector-icons/ionicons';
+import Ionicons from '@react-native-vector-icons/ionicons';
+import { Camera, useCameraDevice, useCameraPermission } from 'react-native-vision-camera';
+import { Image as ImageCompressor } from 'react-native-compressor';
+import RNFS from 'react-native-fs';
 
-const configuration = {
-  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }],
-};
+import SideNavBar from '../components/SideNavBar';
+import LogViewer, { LogEntry } from '../components/LogViewer';
+import InfoBox from '../components/InfoBox';
+import { useLandscapeMode, createLogEntry } from '../utils/helpers';
 
 export default function ClientScreenTCP() {
   const [serverIP, setServerIP] = useState('');
   const [serverPort, setServerPort] = useState('4747');
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
-  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [facingMode, setFacingMode] = useState<'front' | 'back'>('back');
   const [showLogs, setShowLogs] = useState(false);
-  const [logs, setLogs] = useState<Array<{ time: string; type: string; message: string }>>([]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [focusPoint, setFocusPoint] = useState<{ x: number; y: number } | null>(null);
 
   const socketRef = useRef<any>(null);
-  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const bufferRef = useRef<string>('');
   const scrollViewRef = useRef<ScrollView>(null);
+  const cameraRef = useRef<Camera>(null);
+
+  const { hasPermission, requestPermission } = useCameraPermission();
+  const device = useCameraDevice(facingMode);
+  const { isLandscape } = useLandscapeMode();
 
   const addLog = (type: string, message: string) => {
-    const time = new Date().toLocaleTimeString();
-    setLogs((prev) => [...prev, { time, type, message }]);
+    setLogs(prev => [...prev.slice(-100), createLogEntry(type, message)]);
     setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100);
   };
 
   useEffect(() => {
-    return () => {
-      disconnect();
-    };
+    requestCameraPermission();
+    return () => disconnect();
   }, []);
 
-  const connectToStream = async () => {
+  const requestCameraPermission = async () => {
+    if (!hasPermission) {
+      const granted = await requestPermission();
+      if (!granted) {
+        Alert.alert('Permission requise', "L'accès à la caméra est nécessaire.");
+      }
+    }
+  };
+
+  const connectToServer = async () => {
     if (!serverIP.trim()) {
       Alert.alert('Erreur', "Veuillez entrer l'adresse IP du serveur");
       return;
     }
 
     setConnecting(true);
+    addLog('info', `🔌 Connexion à ${serverIP}:${serverPort}...`);
 
     try {
-      // 1. Connexion TCP au serveur
-      console.log(`[TCP Client] Connexion à ${serverIP}:${serverPort}...`);
-      addLog('info', `🔌 Connexion à ${serverIP}:${serverPort}...`);
-
       const socket = TcpSocket.createConnection(
-        {
-          port: parseInt(serverPort),
-          host: serverIP,
-          reuseAddress: true,
-        },
+        { port: parseInt(serverPort), host: serverIP, reuseAddress: true },
         () => {
-          console.log('[TCP Client] Connecté au serveur TCP');
-          addLog('success', `✅ Connecté au serveur TCP`);
-          // Continuer avec WebRTC après connexion TCP réussie
-          setupWebRTC(socket);
-        },
+          addLog('success', '✅ Connecté au serveur');
+          setConnecting(false);
+          setConnected(true);
+        }
       );
 
       socket.on('data', (data: any) => {
         try {
           bufferRef.current += data.toString();
-
-          // Vérifier si on a reçu un message complet (terminé par \n)
-          if (bufferRef.current.includes('\n')) {
-            const messages = bufferRef.current.split('\n');
-            bufferRef.current = messages.pop() || ''; // Garde le dernier fragment incomplet
-
-            for (const message of messages) {
-              if (!message.trim()) continue;
-
-              const response = JSON.parse(message);
-              console.log('[TCP Client] Message reçu:', response.type);
-              addLog('info', `📨 Réponse reçue: ${response.type}`);
-
-              if (response.type === 'answer') {
-                handleAnswer(response.answer, response.candidates);
-              } else if (response.type === 'error') {
-                addLog('error', `❌ Erreur serveur: ${response.error}`);
-                throw new Error(response.error);
-              }
+          while (bufferRef.current.includes('\n')) {
+            const idx = bufferRef.current.indexOf('\n');
+            const message = bufferRef.current.substring(0, idx);
+            bufferRef.current = bufferRef.current.substring(idx + 1);
+            if (!message.trim()) continue;
+            
+            const response = JSON.parse(message);
+            if (response.type === 'photo_saved') {
+              addLog('success', `✅ Photo sauvegardée: ${response.path.split('/').pop()}`);
+            } else if (response.type === 'error') {
+              addLog('error', `❌ Erreur serveur: ${response.error}`);
             }
           }
-        } catch (error: any) {
-          console.error('[TCP Client] Erreur lors du traitement de la réponse:', error);
-          addLog('error', `❌ Erreur traitement: ${error.message}`);
-          Alert.alert('Erreur', error.message);
-          disconnect();
+        } catch (err: any) {
+          addLog('error', `❌ Erreur: ${err.message}`);
         }
       });
 
-      socket.on('error', (error: any) => {
-        console.error('[TCP Client] Erreur TCP:', error);
-        addLog('error', `❌ Erreur TCP: ${error.message}`);
-        Alert.alert('Erreur de connexion', error.message);
+      socket.on('error', (err: any) => {
+        addLog('error', `❌ Erreur TCP: ${err.message}`);
+        Alert.alert('Erreur de connexion', err.message);
         setConnecting(false);
         disconnect();
       });
 
       socket.on('close', () => {
-        console.log('[TCP Client] Connexion TCP fermée');
-        addLog('warning', '⚠️ Connexion TCP fermée');
-        if (connected) {
-          Alert.alert('Déconnecté', 'La connexion avec le serveur a été perdue');
-        }
+        addLog('warning', '⚠️ Connexion fermée');
+        if (connected) Alert.alert('Déconnecté', 'La connexion avec le serveur a été perdue');
         disconnect();
       });
 
       socketRef.current = socket;
-    } catch (error: any) {
-      console.error('[TCP Client] Erreur de connexion:', error);
-      addLog('error', `❌ Erreur connexion: ${error.message}`);
-      Alert.alert('Erreur de connexion', error.message);
+    } catch (err: any) {
+      addLog('error', `❌ Erreur: ${err.message}`);
+      Alert.alert('Erreur de connexion', err.message);
       setConnecting(false);
-      disconnect();
-    }
-  };
-
-  const setupWebRTC = async (socket: any) => {
-    try {
-      // 2. Créer une connexion peer
-      console.log('[TCP Client] Création de la connexion WebRTC...');
-      addLog('info', '🔧 Création connexion WebRTC...');
-      const peerConnection = new RTCPeerConnection(configuration);
-      peerConnectionRef.current = peerConnection;
-
-      // Gérer le stream distant
-      (peerConnection as any).ontrack = (event: any) => {
-        console.log('[TCP Client] Stream reçu, streams count:', event.streams?.length);
-        addLog('success', '✅ Stream vidéo reçu!');
-        if (event.streams && event.streams[0]) {
-          console.log('[TCP Client] Setting remote stream');
-          addLog('info', '📺 Affichage du stream...');
-          setRemoteStream(event.streams[0]);
-          setConnecting(false);
-          setConnected(true);
-        } else {
-          console.log('[TCP Client] No stream in event');
-          addLog('warning', "⚠️ Pas de stream dans l'événement");
-        }
-      };
-
-      // Collecter les candidats ICE
-      const iceCandidates: RTCIceCandidate[] = [];
-      (peerConnection as any).onicecandidate = (event: any) => {
-        if (event.candidate) {
-          console.log('[TCP Client] ICE candidate:', event.candidate.type);
-          iceCandidates.push(event.candidate);
-        }
-      };
-
-      // Gérer les changements de connexion
-      (peerConnection as any).onconnectionstatechange = () => {
-        console.log('[TCP Client] État de connexion:', peerConnection.connectionState);
-        addLog('info', `📊 État WebRTC: ${peerConnection.connectionState}`);
-
-        if (peerConnection.connectionState === 'connected') {
-          addLog('success', '✅ Connexion WebRTC active');
-        } else if (
-          peerConnection.connectionState === 'failed' ||
-          peerConnection.connectionState === 'disconnected'
-        ) {
-          addLog('warning', '⚠️ Connexion WebRTC perdue');
-          disconnect();
-          Alert.alert('Déconnecté', 'La connexion WebRTC a été perdue');
-        }
-      };
-
-      // 3. Créer une offre
-      console.log("[TCP Client] Création de l'offre...");
-      addLog('info', "📝 Création de l'offre WebRTC...");
-      const offer = await peerConnection.createOffer({
-        offerToReceiveVideo: true,
-        offerToReceiveAudio: false,
-      });
-      await peerConnection.setLocalDescription(offer);
-
-      // Attendre la collecte des candidats ICE
-      await new Promise<void>((resolve) => setTimeout(resolve, 3000));
-
-      // 4. Envoyer l'offre au serveur via TCP
-      console.log("[TCP Client] Envoi de l'offre au serveur...");
-      addLog('info', "📤 Envoi de l'offre au serveur...");
-      const offerMessage = JSON.stringify({
-        type: 'offer',
-        offer: offer,
-        candidates: iceCandidates,
-      });
-
-      socket.write(offerMessage + '\n');
-    } catch (error: any) {
-      console.error('[TCP Client] Erreur WebRTC:', error);
-      addLog('error', `❌ Erreur WebRTC: ${error.message}`);
-      Alert.alert('Erreur WebRTC', error.message);
-      setConnecting(false);
-      disconnect();
-    }
-  };
-
-  const handleAnswer = async (answer: any, candidates: RTCIceCandidate[]) => {
-    try {
-      const peerConnection = peerConnectionRef.current;
-      if (!peerConnection) {
-        throw new Error('PeerConnection non initialisée');
-      }
-
-      console.log('[TCP Client] Application de la réponse...');
-      addLog('info', '🔧 Application de la réponse...');
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
-
-      // Ajouter les candidats ICE du serveur
-      for (const candidate of candidates) {
-        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-      }
-
-      console.log('[TCP Client] Connexion WebRTC établie!');
-      addLog('success', '✅ Connexion WebRTC établie!');
-    } catch (error: any) {
-      console.error("[TCP Client] Erreur lors de l'application de la réponse:", error);
-      addLog('error', `❌ Erreur réponse: ${error.message}`);
-      Alert.alert('Erreur', error.message);
-      disconnect();
     }
   };
 
   const disconnect = () => {
-    if (socketRef.current) {
-      socketRef.current.destroy();
-      socketRef.current = null;
-    }
-
-    if (peerConnectionRef.current) {
-      peerConnectionRef.current.close();
-      peerConnectionRef.current = null;
-    }
-
+    socketRef.current?.destroy();
+    socketRef.current = null;
     setConnected(false);
-    setRemoteStream(null);
     setConnecting(false);
     bufferRef.current = '';
   };
 
-  const capturePhoto = async () => {
-    if (Platform.OS === 'android') {
-      try {
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
-          {
-            title: 'Permission stockage',
-            message: "L'application a besoin d'accès au stockage pour sauvegarder des photos",
-            buttonPositive: 'OK',
-          },
-        );
-        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
-          Alert.alert('Permission requise', "L'accès au stockage est nécessaire");
-          return;
-        }
-      } catch (err) {
-        Alert.alert('Erreur', 'Impossible de demander la permission de stockage');
-        return;
-      }
+  const sendPhoto = (filename: string, base64Data: string) => {
+    if (!socketRef.current) {
+      addLog('error', '❌ Socket non connecté');
+      return;
     }
-
-    Alert.alert('Capture', 'Fonction de capture en cours de développement');
+    addLog('info', `📤 Envoi de ${filename} (${Math.round(base64Data.length / 1024)} KB)...`);
+    const message = JSON.stringify({ type: 'photo', filename, data: base64Data });
+    socketRef.current.write(message + '\n', (err: any) => {
+      if (err) addLog('error', `❌ Erreur envoi: ${err?.message || err}`);
+      else addLog('success', `✅ ${filename} envoyé`);
+    });
   };
 
-  return (
-    <View style={styles.container}>
-      {!connected && !connecting ? (
-        <ScrollView style={styles.connectionContainer} contentContainerStyle={styles.scrollContent}>
-          <View style={styles.formContainer}>
-            <Text style={styles.label}>Adresse IP du serveur:</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="192.168.1.10"
-              value={serverIP}
-              onChangeText={setServerIP}
-              keyboardType="numeric"
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
+  const capturePhoto = () => {
+    if (!cameraRef.current || !socketRef.current) {
+      Alert.alert('Erreur', !cameraRef.current ? 'Caméra non disponible' : 'Non connecté au serveur');
+      return;
+    }
+    addLog('info', '📸 Capture...');
 
-            <Text style={styles.label}>Port du serveur:</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="4747"
-              value={serverPort}
-              onChangeText={setServerPort}
-              keyboardType="numeric"
-            />
+    (async () => {
+      try {
+        const photo = await cameraRef.current!.takePhoto({ flash: 'off' });
+        const compressedPath = await ImageCompressor.compress(photo.path, {
+          compressionMethod: 'auto',
+          quality: 0.8,
+          returnableOutputType: 'uri',
+        });
+        const base64 = await RNFS.readFile(compressedPath.replace('file://', ''), 'base64');
+        RNFS.unlink(photo.path).catch(() => {});
+        RNFS.unlink(compressedPath.replace('file://', '')).catch(() => {});
+        sendPhoto(`photo_${Date.now()}.jpg`, base64);
+      } catch (err: any) {
+        addLog('error', `❌ Erreur: ${err?.message || err}`);
+      }
+    })();
+  };
 
-            <TouchableOpacity
-              style={[styles.button, !serverIP && styles.buttonDisabled]}
-              onPress={connectToStream}
-              disabled={!serverIP}
-            >
-              <Text style={styles.buttonText}>📡 Se Connecter</Text>
-            </TouchableOpacity>
+  const toggleCamera = () => {
+    setFacingMode(prev => (prev === 'back' ? 'front' : 'back'));
+    addLog('info', `🔁 Caméra ${facingMode === 'back' ? 'avant' : 'arrière'}`);
+  };
 
-            <View style={styles.infoBox}>
-              <Text style={styles.infoTitle}>💡 Comment se connecter?</Text>
-              <Text style={styles.infoText}>
-                1. Le serveur doit avoir démarré le streaming{'\n'}
-                2. Demandez l'adresse IP du serveur{'\n'}
-                3. Entrez l'IP ci-dessus{'\n'}
-                4. Appuyez sur "Se Connecter"{'\n'}
-                5. Le stream démarrera automatiquement!
-              </Text>
+  const handleFocus = async (e: GestureResponderEvent) => {
+    if (!cameraRef.current || !device?.supportsFocus) return;
+    const { locationX: x, locationY: y } = e.nativeEvent;
+    setFocusPoint({ x, y });
+    try {
+      await cameraRef.current.focus({ x, y });
+    } catch {}
+    setTimeout(() => setFocusPoint(null), 600);
+  };
+
+  // Permission screen
+  if (!hasPermission) {
+    return (
+      <View style={styles.permissionContainer}>
+        <Ionicons name="camera-outline" size={64} color="#999" />
+        <Text style={styles.permissionText}>Permission caméra requise</Text>
+        <TouchableOpacity style={styles.permissionButton} onPress={requestCameraPermission}>
+          <Text style={styles.permissionButtonText}>Autoriser la caméra</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // Connection form (landscape)
+  const renderLandscapeForm = () => (
+    <View style={styles.landscapeContainer}>
+      <View style={styles.landscapeMainRow}>
+        <View style={styles.connectionCardLandscape}>
+          <Ionicons name="wifi-outline" size={24} color="#1976D2" />
+          <View style={styles.inputsRow}>
+            <View style={{ flex: 2 }}>
+              <Text style={styles.labelCompact}>Adresse IP</Text>
+              <TextInput
+                style={styles.inputCompact}
+                placeholder="192.168.1.10"
+                placeholderTextColor="#999"
+                value={serverIP}
+                onChangeText={setServerIP}
+                keyboardType="numeric"
+                autoCapitalize="none"
+              />
             </View>
-
-            <View style={styles.exampleBox}>
-              <Text style={styles.exampleTitle}>Exemple d'adresse:</Text>
-              <Text style={styles.exampleText}>
-                IP: 192.168.1.10{'\n'}
-                Port: 4747
-              </Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.labelCompact}>Port</Text>
+              <TextInput
+                style={styles.inputCompact}
+                placeholder="4747"
+                placeholderTextColor="#999"
+                value={serverPort}
+                onChangeText={setServerPort}
+                keyboardType="numeric"
+              />
             </View>
-
-            <TouchableOpacity style={styles.logButton} onPress={() => setShowLogs(!showLogs)}>
-              <Text style={styles.logButtonText}>
-                {showLogs ? '📋 Masquer les logs' : '📋 Afficher les logs'}
-              </Text>
-            </TouchableOpacity>
-
-            {showLogs && (
-              <View style={styles.logContainer}>
-                <ScrollView
-                  ref={scrollViewRef}
-                  style={styles.logScroll}
-                  contentContainerStyle={styles.logContent}
-                >
-                  {logs.length === 0 ? (
-                    <Text style={styles.logEmpty}>Aucun log pour le moment</Text>
-                  ) : (
-                    logs.map((log, index) => (
-                      <View key={index} style={styles.logEntry}>
-                        <Text style={styles.logTime}>{log.time}</Text>
-                        <Text
-                          style={[
-                            styles.logMessage,
-                            log.type === 'error' && styles.logError,
-                            log.type === 'success' && styles.logSuccess,
-                            log.type === 'warning' && styles.logWarning,
-                          ]}
-                        >
-                          {log.message}
-                        </Text>
-                      </View>
-                    ))
-                  )}
-                </ScrollView>
-              </View>
-            )}
           </View>
-        </ScrollView>
-      ) : connecting ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#2196F3" />
-          <Text style={styles.loadingText}>Connexion au serveur...</Text>
-          <Text style={styles.loadingSubtext}>
-            {serverIP}:{serverPort}
-          </Text>
-
-          <TouchableOpacity
-            style={styles.logButtonConnecting}
-            onPress={() => setShowLogs(!showLogs)}
-          >
-            <Text style={styles.logButtonText}>
-              {showLogs ? '📋 Masquer les logs' : '📋 Afficher les logs'}
-            </Text>
-          </TouchableOpacity>
-
-          {showLogs && (
-            <View style={styles.logContainerConnecting}>
-              <ScrollView
-                ref={scrollViewRef}
-                style={styles.logScroll}
-                contentContainerStyle={styles.logContent}
-              >
-                {logs.length === 0 ? (
-                  <Text style={styles.logEmpty}>Aucun log</Text>
-                ) : (
-                  logs.map((log, index) => (
-                    <View key={index} style={styles.logEntry}>
-                      <Text style={styles.logTime}>{log.time}</Text>
-                      <Text
-                        style={[
-                          styles.logMessage,
-                          log.type === 'error' && styles.logError,
-                          log.type === 'success' && styles.logSuccess,
-                          log.type === 'warning' && styles.logWarning,
-                        ]}
-                      >
-                        {log.message}
-                      </Text>
-                    </View>
-                  ))
-                )}
-              </ScrollView>
-            </View>
-          )}
         </View>
+        <TouchableOpacity
+          style={[styles.connectButtonLandscape, !serverIP && styles.buttonDisabled]}
+          onPress={connectToServer}
+          disabled={!serverIP}
+        >
+          <Ionicons name="enter-outline" size={28} color="#fff" />
+          <Text style={styles.buttonTextLandscape}>Connecter</Text>
+        </TouchableOpacity>
+      </View>
+      <InfoBox title="💡 Comment utiliser ?" isLandscape>
+        1. Le serveur doit être démarré  •  2. Entrez l'IP  •  3. Connectez-vous  •  4. Prenez des photos
+      </InfoBox>
+      <LogViewer ref={scrollViewRef} logs={logs} showLogs={showLogs} onToggle={() => setShowLogs(!showLogs)} isLandscape />
+    </View>
+  );
+
+  // Connection form (portrait)
+  const renderPortraitForm = () => (
+    <ScrollView style={styles.connectionContainer} contentContainerStyle={styles.scrollContent}>
+      <View style={styles.formContainer}>
+        <Text style={styles.label}>Adresse IP du serveur:</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="192.168.1.10"
+          value={serverIP}
+          onChangeText={setServerIP}
+          keyboardType="numeric"
+          autoCapitalize="none"
+        />
+        <Text style={styles.label}>Port du serveur:</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="4747"
+          value={serverPort}
+          onChangeText={setServerPort}
+          keyboardType="numeric"
+        />
+        <TouchableOpacity
+          style={[styles.button, !serverIP && styles.buttonDisabled]}
+          onPress={connectToServer}
+          disabled={!serverIP}
+        >
+          <Ionicons name="wifi-outline" size={20} color="#fff" style={{ marginRight: 8 }} />
+          <Text style={styles.buttonText}>Se connecter</Text>
+        </TouchableOpacity>
+        <InfoBox title="💡 Comment utiliser ?">
+          {`1. Le serveur doit être démarré\n2. Entrez l'adresse IP du serveur\n3. Appuyez sur "Se connecter"\n4. Prenez des photos avec le bouton caméra\n5. Les photos sont sauvegardées sur le serveur`}
+        </InfoBox>
+        <LogViewer ref={scrollViewRef} logs={logs} showLogs={showLogs} onToggle={() => setShowLogs(!showLogs)} />
+      </View>
+    </ScrollView>
+  );
+
+  // Camera view
+  const renderCameraView = () => (
+    <View style={styles.cameraContainer}>
+      <StatusBar hidden />
+      {device ? (
+        <Pressable style={StyleSheet.absoluteFill} onPress={handleFocus}>
+          <Camera
+            ref={cameraRef}
+            style={StyleSheet.absoluteFill}
+            device={device}
+            isActive={true}
+            photo={true}
+            enableZoomGesture={true}
+            onInitialized={() => setCameraReady(true)}
+          />
+          {focusPoint && (
+            <View style={[styles.focusIndicator, { left: focusPoint.x - 30, top: focusPoint.y - 30 }]} />
+          )}
+        </Pressable>
       ) : (
-        <View style={styles.streamContainer}>
-          {remoteStream ? (
-            <RTCView
-              streamURL={remoteStream.toURL()}
-              style={styles.streamView}
-              objectFit="contain"
-              mirror={false}
-            />
-          ) : (
-            <View style={styles.waitingContainer}>
-              <ActivityIndicator size="large" color="#fff" />
-              <Text style={styles.waitingText}>En attente du stream...</Text>
-            </View>
-          )}
-
-          <View style={styles.overlayControls}>
-            <View style={styles.statusBar}>
-              <View style={styles.liveIndicator}>
-                <View style={styles.liveDot} />
-                <Text style={styles.liveText}>EN DIRECT</Text>
-              </View>
-
-              <View style={styles.ipDisplay}>
-                <Text style={styles.ipDisplayText}>
-                  📡 {serverIP}:{serverPort}
-                </Text>
-              </View>
-
-              <View style={{ width: 48 }} />
-            </View>
-
-            <View style={styles.controlButtons}>
-              <TouchableOpacity
-                style={[styles.controlButton, styles.captureButton]}
-                onPress={capturePhoto}
-                accessibilityLabel="Capturer la photo"
-              >
-                <Ionicons name="camera-outline" size={20} color="#fff" />
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.controlButton}
-                onPress={() => setShowLogs(!showLogs)}
-                accessibilityLabel="Afficher les logs"
-              >
-                <Ionicons name="clipboard-outline" size={20} color="#fff" />
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.controlButton, styles.disconnectButton]}
-                onPress={disconnect}
-                accessibilityLabel="Se déconnecter"
-              >
-                <Ionicons name="close-outline" size={20} color="#fff" />
-              </TouchableOpacity>
-            </View>
-          </View>
-
-          {showLogs && (
-            <View style={styles.logOverlay}>
-              <View style={styles.logHeader}>
-                <Text style={styles.logHeaderText}>📋 Logs Client</Text>
-                <TouchableOpacity onPress={() => setShowLogs(false)}>
-                  <Text style={styles.logCloseButton}>✕</Text>
-                </TouchableOpacity>
-              </View>
-              <ScrollView
-                ref={scrollViewRef}
-                style={styles.logScrollOverlay}
-                contentContainerStyle={styles.logContent}
-              >
-                {logs.length === 0 ? (
-                  <Text style={styles.logEmpty}>Aucun log</Text>
-                ) : (
-                  logs.map((log, index) => (
-                    <View key={index} style={styles.logEntry}>
-                      <Text style={styles.logTime}>{log.time}</Text>
-                      <Text
-                        style={[
-                          styles.logMessage,
-                          log.type === 'error' && styles.logError,
-                          log.type === 'success' && styles.logSuccess,
-                          log.type === 'warning' && styles.logWarning,
-                        ]}
-                      >
-                        {log.message}
-                      </Text>
-                    </View>
-                  ))
-                )}
-              </ScrollView>
-            </View>
-          )}
+        <View style={styles.noCameraContainer}>
+          <Ionicons name="camera-outline" size={64} color="#666" />
+          <Text style={styles.noCameraText}>Caméra non disponible</Text>
         </View>
       )}
+
+      <View style={[styles.overlay, isLandscape && styles.overlayLandscape]}>
+        <View style={[styles.topBar, isLandscape && styles.topBarLandscape]}>
+          <View style={[styles.badge, isLandscape && styles.badgeLandscape]}>
+            <View style={styles.connectedDot} />
+            <Text style={[styles.badgeText, isLandscape && styles.badgeTextLandscape]}>
+              {serverIP}:{serverPort}
+            </Text>
+          </View>
+        </View>
+
+        <View style={[styles.controls, isLandscape && styles.controlsLandscape]}>
+          <TouchableOpacity style={[styles.controlBtn, styles.secondaryBtn, isLandscape && styles.controlBtnLandscape]} onPress={toggleCamera}>
+            <Ionicons name="camera-reverse-outline" size={isLandscape ? 20 : 24} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.controlBtn, styles.captureBtn, isLandscape && styles.captureBtnLandscape]}
+            onPress={capturePhoto}
+            disabled={!cameraReady}
+          >
+            <Ionicons name="camera" size={isLandscape ? 28 : 32} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.controlBtn, styles.disconnectBtn, isLandscape && styles.controlBtnLandscape]} onPress={disconnect}>
+            <Ionicons name="close" size={isLandscape ? 20 : 24} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      <LogViewer
+        ref={scrollViewRef}
+        logs={logs}
+        showLogs={showLogs}
+        onToggle={() => setShowLogs(!showLogs)}
+        onClose={() => setShowLogs(false)}
+        isLandscape={isLandscape}
+        variant="overlay"
+      />
+    </View>
+  );
+
+  return (
+    <View style={[styles.container, isLandscape && styles.containerLandscape]}>
+      <View style={styles.mainContent}>
+        {!connected && !connecting ? (
+          isLandscape ? renderLandscapeForm() : renderPortraitForm()
+        ) : connecting ? (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#2196F3" />
+            <Text style={styles.loadingText}>Connexion au serveur...</Text>
+            <Text style={styles.loadingSubtext}>{serverIP}:{serverPort}</Text>
+          </View>
+        ) : (
+          renderCameraView()
+        )}
+      </View>
+      {isLandscape && <SideNavBar />}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f5f5f5',
-  },
-  connectionContainer: {
-    flex: 1,
-  },
-  scrollContent: {
-    flexGrow: 1,
-  },
-  header: {
-    backgroundColor: '#2196F3',
-    padding: 20,
-    paddingTop: 60,
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#fff',
-    textAlign: 'center',
-  },
-  formContainer: {
-    padding: 20,
-  },
-  label: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#333',
-    marginBottom: 10,
-    marginTop: 10,
-  },
-  input: {
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 10,
-    padding: 15,
-    fontSize: 16,
-    marginBottom: 15,
-  },
-  button: {
-    backgroundColor: '#2196F3',
-    padding: 18,
-    borderRadius: 10,
-    alignItems: 'center',
-    marginTop: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  buttonDisabled: {
-    backgroundColor: '#ccc',
-  },
-  buttonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  infoBox: {
-    marginTop: 30,
-    backgroundColor: '#e3f2fd',
-    padding: 15,
-    borderRadius: 10,
-    borderLeftWidth: 4,
-    borderLeftColor: '#2196F3',
-  },
-  infoTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#1976D2',
-    marginBottom: 10,
-  },
-  infoText: {
-    fontSize: 14,
-    color: '#555',
-    lineHeight: 22,
-  },
-  exampleBox: {
-    marginTop: 15,
-    backgroundColor: '#FFF3E0',
-    padding: 15,
-    borderRadius: 10,
-  },
-  exampleTitle: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#E65100',
-    marginBottom: 5,
-  },
-  exampleText: {
-    fontSize: 13,
-    color: '#E65100',
-    fontFamily: 'monospace',
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  loadingText: {
-    marginTop: 15,
-    fontSize: 16,
-    color: '#666',
-  },
-  loadingSubtext: {
-    marginTop: 10,
-    fontSize: 14,
-    color: '#999',
-    fontFamily: 'monospace',
-  },
-  streamContainer: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  streamView: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  waitingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#000',
-  },
-  waitingText: {
-    marginTop: 15,
-    fontSize: 16,
-    color: '#fff',
-  },
-  overlayControls: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    justifyContent: 'space-between',
-  },
-  liveIndicator: {
-    alignSelf: 'flex-end',
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-    margin: 15,
-  },
-  liveDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#ff0000',
-    marginRight: 6,
-  },
-  liveText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
-  serverInfo: {
-    alignSelf: 'center',
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    paddingHorizontal: 15,
-    paddingVertical: 8,
-    borderRadius: 20,
-  },
-  serverInfoText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  statusBar: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 12,
-    paddingTop: 18,
-  },
-  ipDisplay: {
-    alignSelf: 'center',
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-    justifyContent: 'center',
-  },
-  ipDisplayText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  controlButtons: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 18,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    paddingHorizontal: 16,
-    gap: 12,
-  },
-  controlButton: {
-    minWidth: 56,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    borderRadius: 28,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginHorizontal: 6,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 6,
-    elevation: 6,
-  },
-  captureButton: {
-    backgroundColor: '#4CAF50',
-  },
-  disconnectButton: {
-    backgroundColor: '#f44336',
-  },
-  controlButtonText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  logButton: {
-    backgroundColor: '#757575',
-    padding: 15,
-    borderRadius: 10,
-    alignItems: 'center',
-    marginTop: 10,
-  },
-  logButtonText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  logContainer: {
-    marginTop: 15,
-    backgroundColor: '#1a1a1a',
-    borderRadius: 10,
-    maxHeight: 250,
-    borderWidth: 1,
-    borderColor: '#333',
-  },
-  logScroll: {
-    flex: 1,
-  },
-  logContent: {
-    padding: 10,
-  },
-  logEmpty: {
-    color: '#666',
-    textAlign: 'center',
-    padding: 20,
-    fontStyle: 'italic',
-  },
-  logEntry: {
-    marginBottom: 8,
-  },
-  logTime: {
-    fontSize: 10,
-    color: '#999',
-    marginBottom: 2,
-  },
-  logMessage: {
-    fontSize: 12,
-    color: '#fff',
-  },
-  logError: {
-    color: '#ff5252',
-  },
-  logSuccess: {
-    color: '#4CAF50',
-  },
-  logWarning: {
-    color: '#FFA726',
-  },
-  logOverlay: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: 'rgba(0,0,0,0.95)',
-    maxHeight: '40%',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-  },
-  logHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 15,
-    borderBottomWidth: 1,
-    borderBottomColor: '#333',
-  },
-  logHeaderText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  logCloseButton: {
-    color: '#fff',
-    fontSize: 24,
-    fontWeight: 'bold',
-  },
-  logScrollOverlay: {
-    flex: 1,
-  },
-  logButtonConnecting: {
-    backgroundColor: '#757575',
-    padding: 15,
-    borderRadius: 10,
-    alignItems: 'center',
-    marginTop: 30,
-    marginHorizontal: 20,
-  },
-  logContainerConnecting: {
-    marginTop: 15,
-    marginHorizontal: 20,
-    backgroundColor: '#1a1a1a',
-    borderRadius: 10,
-    maxHeight: 250,
-    borderWidth: 1,
-    borderColor: '#333',
-  },
+  // Container
+  container: { flex: 1, backgroundColor: '#f5f5f5' },
+  containerLandscape: { flexDirection: 'row' },
+  mainContent: { flex: 1 },
+  
+  // Permission
+  permissionContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 40 },
+  permissionText: { fontSize: 18, color: '#666', marginTop: 20, marginBottom: 30, textAlign: 'center' },
+  permissionButton: { backgroundColor: '#2196F3', paddingHorizontal: 30, paddingVertical: 15, borderRadius: 10 },
+  permissionButtonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
+  
+  // Connection form
+  connectionContainer: { flex: 1 },
+  scrollContent: { flexGrow: 1, justifyContent: 'center' },
+  formContainer: { padding: 20 },
+  label: { fontSize: 16, fontWeight: '600', color: '#333', marginBottom: 10, marginTop: 10 },
+  input: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#ddd', borderRadius: 10, padding: 15, fontSize: 16, marginBottom: 15 },
+  button: { backgroundColor: '#2196F3', padding: 18, borderRadius: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginTop: 10, elevation: 3 },
+  buttonDisabled: { backgroundColor: '#ccc' },
+  buttonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
+  
+  // Landscape form
+  landscapeContainer: { flex: 1, padding: 15, justifyContent: 'center' },
+  landscapeMainRow: { flexDirection: 'row', alignItems: 'center', gap: 15, marginBottom: 15 },
+  connectionCardLandscape: { backgroundColor: '#E3F2FD', borderRadius: 12, paddingHorizontal: 15, paddingVertical: 12, flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
+  inputsRow: { flex: 1, flexDirection: 'row', gap: 10 },
+  labelCompact: { fontSize: 11, fontWeight: '600', color: '#1976D2', marginBottom: 4 },
+  inputCompact: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#ddd', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14 },
+  connectButtonLandscape: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#2196F3', paddingHorizontal: 20, paddingVertical: 14, borderRadius: 12, gap: 8, elevation: 3 },
+  buttonTextLandscape: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
+  
+  // Loading
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
+  loadingText: { marginTop: 15, fontSize: 16, color: '#666' },
+  loadingSubtext: { marginTop: 10, fontSize: 14, color: '#999', fontFamily: 'monospace' },
+  
+  // Camera
+  cameraContainer: { flex: 1, backgroundColor: '#000' },
+  noCameraContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#1a1a1a' },
+  noCameraText: { color: '#666', fontSize: 16, marginTop: 15 },
+  focusIndicator: { position: 'absolute', width: 60, height: 60, borderWidth: 2, borderColor: '#fff', borderRadius: 8 },
+  overlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'space-between' },
+  overlayLandscape: { flexDirection: 'row', justifyContent: 'space-between' },
+  topBar: { padding: 15, paddingTop: 20 },
+  topBarLandscape: { flex: 1, padding: 8, justifyContent: 'flex-start' },
+  badge: { alignSelf: 'center', flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 15, paddingVertical: 8, borderRadius: 20 },
+  badgeLandscape: { paddingHorizontal: 10, paddingVertical: 4 },
+  connectedDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#4CAF50', marginRight: 8 },
+  badgeText: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  badgeTextLandscape: { fontSize: 11 },
+  controls: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', paddingBottom: 30, gap: 20 },
+  controlsLandscape: { flexDirection: 'column', paddingBottom: 0, paddingRight: 20, gap: 15 },
+  controlBtn: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.2)' },
+  controlBtnLandscape: { width: 48, height: 48, borderRadius: 24 },
+  secondaryBtn: { backgroundColor: 'rgba(0,0,0,0.5)' },
+  captureBtn: { width: 72, height: 72, borderRadius: 36, backgroundColor: '#4CAF50', elevation: 5 },
+  captureBtnLandscape: { width: 64, height: 64, borderRadius: 32 },
+  disconnectBtn: { backgroundColor: '#f44336' },
 });
