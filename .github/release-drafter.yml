@@ -1,0 +1,40 @@
+name-template: 'v$NEXT_PATCH_VERSION'
+tag-template: 'v$NEXT_PATCH_VERSION'
+change-template: '- $TITLE (#$NUMBER) @$AUTHOR'
+categories:
+  - title: '🚀 Added'
+    labels:
+      - 'feature'
+      - 'enhancement'
+  - title: '🐛 Fixed'
+    labels:
+      - 'bug'
+  - title: '🧰 Changed'
+    labels:
+      - 'chore'
+      - 'refactor'
+  - title: '🧪 Tests'
+    labels:
+      - 'test'
+template: |
+  ## Changelog
+
+  ### :sparkles: Nouveautés
+  $ADDED
+
+  ### :bug: Corrections
+  $BUGS
+
+  ### :wrench: Changements
+  $CHANGED
+
+  ### :white_check_mark: Tests
+  $TESTS
+
+  ---
+
+  _Généré automatiquement par Release Drafter_
+
+no-changes-template: '- Aucune modification notable'
+exclude-labels:
+  - 'skip-changelog'
