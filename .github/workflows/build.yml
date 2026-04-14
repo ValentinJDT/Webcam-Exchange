@@ -20,6 +20,7 @@ jobs:
         run: |
           npm ci
   build-android:
+    permissions: write-all
     needs: install-and-test
     runs-on: ubuntu-latest
     steps: 
