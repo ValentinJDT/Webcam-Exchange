@@ -339,11 +339,13 @@ export default function ServerScreenTCP() {
         </TouchableOpacity>
       </View>
 
-      <InfoBox title="💡 Comment ça marche ?" variant="orange" isLandscape>
-        1. Démarrez le serveur • 2. Communiquez l'IP aux clients • 3. Les photos sont sauvegardées dans la Galerie
+      <InfoBox title="Comment recevoir des images sur cet appareil ?" variant="orange" isLandscape>
+        1. Démarrez le serveur de réception • 2. Communiquez l'IP aux clients • 3. Les photos sont sauvegardées dans la Galerie
       </InfoBox>
 
-      <LogViewer ref={scrollViewRef} logs={logs} showLogs={showLogs} onToggle={() => setShowLogs(!showLogs)} isLandscape />
+      {logs.length > 0 && (
+        <LogViewer ref={scrollViewRef} logs={logs} showLogs={showLogs} onToggle={() => setShowLogs(!showLogs)} isLandscape />
+      )}
     </View>
   );
 
@@ -366,7 +368,7 @@ export default function ServerScreenTCP() {
         onPress={serverStarted ? stopServer : startServer}
       >
         <Ionicons name={serverStarted ? 'stop-circle' : 'play-circle'} size={28} color="#fff" />
-        <Text style={styles.serverButtonText}>{serverStarted ? 'Arrêter le serveur' : 'Démarrer le serveur'}</Text>
+        <Text style={styles.serverButtonText}>{serverStarted ? 'Arrêter le serveur de réception' : 'Démarrer le serveur de réception'}</Text>
       </TouchableOpacity>
 
       {serverStarted && (
@@ -376,11 +378,13 @@ export default function ServerScreenTCP() {
         </View>
       )}
 
-      <InfoBox title="💡 Comment ça marche ?" variant="orange">
-        {`1. Démarrez le serveur\n2. Communiquez l'IP aux clients\n3. Les clients se connectent et prennent des photos\n4. Les photos sont sauvegardées dans la Galerie`}
+      <InfoBox title="Comment recevoir des images sur cet appareil ?" variant="orange">
+        {`1. Démarrez le serveur de réception\n2. Communiquez l'IP aux clients\n3. Les clients se connectent et prennent des photos\n4. Les photos sont sauvegardées dans la Galerie`}
       </InfoBox>
 
-      <LogViewer ref={scrollViewRef} logs={logs} showLogs={showLogs} onToggle={() => setShowLogs(!showLogs)} />
+      {logs.length > 0 && (
+        <LogViewer ref={scrollViewRef} logs={logs} showLogs={showLogs} onToggle={() => setShowLogs(!showLogs)} />
+      )}
     </ScrollView>
   );
 
