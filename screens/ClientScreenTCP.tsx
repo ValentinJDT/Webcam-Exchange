@@ -9,9 +9,10 @@ import {
   ActivityIndicator,
   ScrollView,
   StatusBar,
-  Pressable,
   GestureResponderEvent,
+  Modal,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import TcpSocket from 'react-native-tcp-socket';
 import Ionicons from '@react-native-vector-icons/ionicons';
 import { Camera, useCameraDevice, useCameraPermission } from 'react-native-vision-camera';
@@ -33,6 +34,12 @@ export default function ClientScreenTCP() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [cameraReady, setCameraReady] = useState(false);
   const [focusPoint, setFocusPoint] = useState<{ x: number; y: number } | null>(null);
+  const [justCaptured, setJustCaptured] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+  const [favorites, setFavorites] = useState<Array<{ name: string; ip: string; port: string }>>([]); 
+  const [showFavoritesModal, setShowFavoritesModal] = useState(false);
+  const [showAddFavoriteModal, setShowAddFavoriteModal] = useState(false);
+  const [newFavoriteName, setNewFavoriteName] = useState('');
 
   const socketRef = useRef<any>(null);
   const bufferRef = useRef<string>('');
@@ -51,6 +58,7 @@ export default function ClientScreenTCP() {
 
   useEffect(() => {
     requestCameraPermission();
+    loadFavorites();
     return () => disconnect();
   }, []);
 
@@ -63,18 +71,67 @@ export default function ClientScreenTCP() {
     }
   };
 
-  const connectToServer = async () => {
+  const loadFavorites = async () => {
+    try {
+      const stored = await AsyncStorage.getItem('tcp_favorites');
+      if (stored) {
+        setFavorites(JSON.parse(stored));
+      }
+    } catch (err) {
+      console.error('Erreur chargement favoris:', err);
+    }
+  };
+
+  const saveFavorites = async (newFavorites: typeof favorites) => {
+    try {
+      await AsyncStorage.setItem('tcp_favorites', JSON.stringify(newFavorites));
+      setFavorites(newFavorites);
+    } catch (err) {
+      Alert.alert('Erreur', 'Impossible de sauvegarder les favoris');
+    }
+  };
+
+  const addToFavorites = () => {
     if (!serverIP.trim()) {
+      Alert.alert('Erreur', "Veuillez entrer une adresse IP");
+      return;
+    }
+    setNewFavoriteName('');
+    setShowAddFavoriteModal(true);
+  };
+
+  const confirmAddFavorite = () => {
+    if (newFavoriteName.trim()) {
+      const newFav = { name: newFavoriteName.trim(), ip: serverIP, port: serverPort };
+      const updated = [...favorites, newFav];
+      saveFavorites(updated);
+      setShowAddFavoriteModal(false);
+      setNewFavoriteName('');
+      Alert.alert('Succès', 'Connexion ajoutée aux favoris');
+    }
+  };
+
+  const selectFavorite = (fav: { name: string; ip: string; port: string }) => {
+    setServerIP(fav.ip);
+    setServerPort(fav.port);
+    setShowFavoritesModal(false);
+    addLog('info', `📌 Favoris sélectionné: ${fav.name}`);
+    // Connecter automatiquement après sélection
+    connectToServerWithIP(fav.ip, fav.port);
+  };
+
+  const connectToServerWithIP = async (ip: string, port: string) => {
+    if (!ip.trim()) {
       Alert.alert('Erreur', "Veuillez entrer l'adresse IP du serveur");
       return;
     }
 
     setConnecting(true);
-    addLog('info', `🔌 Connexion à ${serverIP}:${serverPort}...`);
+    addLog('info', `🔌 Connexion à ${ip}:${port}...`);
 
     try {
       const socket = TcpSocket.createConnection(
-        { port: parseInt(serverPort), host: serverIP, reuseAddress: true },
+        { port: parseInt(port), host: ip, reuseAddress: true },
         () => {
           addLog('success', '✅ Connecté au serveur');
           setConnecting(false);
@@ -124,6 +181,28 @@ export default function ClientScreenTCP() {
     }
   };
 
+  const deleteFavorite = (index: number) => {
+    Alert.alert(
+      'Supprimer',
+      `Supprimer "${favorites[index].name}" des favoris ?`,
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Supprimer',
+          style: 'destructive',
+          onPress: () => {
+            const updated = favorites.filter((_, i) => i !== index);
+            saveFavorites(updated);
+          },
+        },
+      ]
+    );
+  };
+
+  const connectToServer = async () => {
+    await connectToServerWithIP(serverIP, serverPort);
+  };
+
   const disconnect = () => {
     socketRef.current?.destroy();
     socketRef.current = null;
@@ -146,15 +225,25 @@ export default function ClientScreenTCP() {
   };
 
   const capturePhoto = () => {
-    if (!cameraRef.current || !socketRef.current) {
-      Alert.alert('Erreur', !cameraRef.current ? 'Caméra non disponible' : 'Non connecté au serveur');
+    if (!cameraRef.current || !socketRef.current || capturing || justCaptured) {
+      if (!capturing && !justCaptured) {
+        Alert.alert('Erreur', !cameraRef.current ? 'Caméra non disponible' : 'Non connecté au serveur');
+      }
       return;
     }
     addLog('info', '📸 Capture...');
 
     (async () => {
       try {
+        setCapturing(true);
         const photo = await cameraRef.current!.takePhoto({ flash: 'off' });
+        
+        // Afficher la coche immédiatement après la capture
+        setCapturing(false);
+        setJustCaptured(true);
+        setTimeout(() => setJustCaptured(false), 500);
+        
+        // Continuer le traitement en arrière-plan
         const compressedPath = await ImageCompressor.compress(photo.path, {
           compressionMethod: 'auto',
           quality: 0.8,
@@ -166,6 +255,8 @@ export default function ClientScreenTCP() {
         sendPhoto(`photo_${Date.now()}.jpg`, base64);
       } catch (err: any) {
         addLog('error', `❌ Erreur: ${err?.message || err}`);
+        setCapturing(false);
+        setJustCaptured(false);
       }
     })();
   };
@@ -241,19 +332,36 @@ export default function ClientScreenTCP() {
             </View>
           </View>
         </View>
-        <TouchableOpacity
-          style={[styles.connectButtonLandscape, !serverIP && styles.buttonDisabled]}
-          onPress={connectToServer}
-          disabled={!serverIP}
-        >
-          <Ionicons name="enter-outline" size={28} color="#fff" />
-          <Text style={styles.buttonTextLandscape}>Connecter</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', gap: 10 }}>
+          <TouchableOpacity
+            style={styles.favoriteButtonLandscape}
+            onPress={() => setShowFavoritesModal(true)}
+          >
+            <Ionicons name="star-outline" size={24} color="#666" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.favoriteButtonLandscape}
+            onPress={addToFavorites}
+            disabled={!serverIP}
+          >
+            <Ionicons name="add" size={24} color={serverIP ? "#666" : "#ccc"} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.connectButtonLandscape, !serverIP && styles.buttonDisabled]}
+            onPress={connectToServer}
+            disabled={!serverIP}
+          >
+            <Ionicons name="enter-outline" size={28} color="#fff" />
+            <Text style={styles.buttonTextLandscape}>Connecter</Text>
+          </TouchableOpacity>
+        </View>
       </View>
-      <InfoBox title="💡 Comment utiliser ?" isLandscape>
-        1. Le serveur doit être démarré  •  2. Entrez l'IP  •  3. Connectez-vous  •  4. Prenez des photos
+      <InfoBox title="Comment envoyer des images ?" isLandscape>
+        1. Le serveur de réception de l'appareil destinataire doit être démarré  •  2. Entrez l'IP  •  3. Connectez-vous  •  4. Prenez des photos
       </InfoBox>
-      <LogViewer ref={scrollViewRef} logs={logs} showLogs={showLogs} onToggle={() => setShowLogs(!showLogs)} isLandscape />
+      {logs.length > 0 && (
+        <LogViewer ref={scrollViewRef} logs={logs} showLogs={showLogs} onToggle={() => setShowLogs(!showLogs)} isLandscape />
+      )}
     </View>
   );
 
@@ -278,6 +386,21 @@ export default function ClientScreenTCP() {
           onChangeText={setServerPort}
           keyboardType="numeric"
         />
+        <View style={{ flexDirection: 'row', gap: 10, marginTop: 10 }}>
+          <TouchableOpacity
+            style={styles.favoriteButton}
+            onPress={() => setShowFavoritesModal(true)}
+          >
+            <Ionicons name="star" size={20} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.favoriteButton, !serverIP && styles.buttonDisabled]}
+            onPress={addToFavorites}
+            disabled={!serverIP}
+          >
+            <Ionicons name="add" size={20} color="#fff" />
+          </TouchableOpacity>
+        </View>
         <TouchableOpacity
           style={[styles.button, !serverIP && styles.buttonDisabled]}
           onPress={connectToServer}
@@ -286,10 +409,12 @@ export default function ClientScreenTCP() {
           <Ionicons name="wifi-outline" size={20} color="#fff" style={{ marginRight: 8 }} />
           <Text style={styles.buttonText}>Se connecter</Text>
         </TouchableOpacity>
-        <InfoBox title="💡 Comment utiliser ?">
-          {`1. Le serveur doit être démarré\n2. Entrez l'adresse IP du serveur\n3. Appuyez sur "Se connecter"\n4. Prenez des photos avec le bouton caméra\n5. Les photos sont sauvegardées sur le serveur`}
+        <InfoBox title="Comment envoyer des images ?">
+          {`1. Le serveur de réception de l'appareil destinataire doit être démarré\n2. Entrez l'adresse IP du serveur\n3. Appuyez sur "Se connecter"\n4. Prenez des photos avec le bouton caméra\n5. Les photos sont sauvegardées sur le serveur`}
         </InfoBox>
-        <LogViewer ref={scrollViewRef} logs={logs} showLogs={showLogs} onToggle={() => setShowLogs(!showLogs)} />
+        {logs.length > 0 && (
+          <LogViewer ref={scrollViewRef} logs={logs} showLogs={showLogs} onToggle={() => setShowLogs(!showLogs)} />
+        )}
       </View>
     </ScrollView>
   );
@@ -336,11 +461,21 @@ export default function ClientScreenTCP() {
             <Ionicons name="camera-reverse-outline" size={isLandscape ? 20 : 24} color="#fff" />
           </TouchableOpacity>
           <TouchableOpacity
-            style={[styles.controlBtn, styles.captureBtn, isLandscape && styles.captureBtnLandscape]}
+            style={[
+              styles.controlBtn,
+              styles.captureBtn,
+              isLandscape && styles.captureBtnLandscape,
+              justCaptured && styles.captureBtnConfirm,
+              capturing && styles.captureBtnCapturing
+            ]}
             onPress={capturePhoto}
-            disabled={!cameraReady}
+            disabled={!cameraReady || justCaptured || capturing}
           >
-            <Ionicons name="camera" size={isLandscape ? 28 : 32} color="#fff" />
+            {capturing ? (
+              <Ionicons name="hourglass" size={isLandscape ? 28 : 32} color="#fff" />
+            ) : (
+              <Ionicons name={justCaptured ? "checkmark" : "camera"} size={isLandscape ? 28 : 32} color="#fff" />
+            )}
           </TouchableOpacity>
           <TouchableOpacity style={[styles.controlBtn, styles.disconnectBtn, isLandscape && styles.controlBtnLandscape]} onPress={disconnect}>
             <Ionicons name="close" size={isLandscape ? 20 : 24} color="#fff" />
@@ -348,20 +483,117 @@ export default function ClientScreenTCP() {
         </View>
       </View>
 
-      <LogViewer
-        ref={scrollViewRef}
-        logs={logs}
-        showLogs={showLogs}
-        onToggle={() => setShowLogs(!showLogs)}
-        onClose={() => setShowLogs(false)}
-        isLandscape={isLandscape}
-        variant="overlay"
-      />
+      {logs.length > 0 && (
+        <LogViewer
+          ref={scrollViewRef}
+          logs={logs}
+          showLogs={showLogs}
+          onToggle={() => setShowLogs(!showLogs)}
+          onClose={() => setShowLogs(false)}
+          isLandscape={isLandscape}
+          variant="overlay"
+        />
+      )}
     </View>
+  );
+
+  const renderAddFavoriteModal = () => (
+    <Modal
+      visible={showAddFavoriteModal}
+      transparent
+      animationType="fade"
+      onRequestClose={() => setShowAddFavoriteModal(false)}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalContent}>
+          <View style={styles.modalHeader}>
+            <Ionicons name="add-circle" size={24} color="#2196F3" />
+            <Text style={styles.modalTitle}>Ajouter aux favoris</Text>
+            <TouchableOpacity onPress={() => setShowAddFavoriteModal(false)}>
+              <Ionicons name="close" size={24} color="#666" />
+            </TouchableOpacity>
+          </View>
+          <View style={{ padding: 10 }}>
+            <Text style={styles.label}>Nom de la connexion :</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Ex: Serveur principal"
+              value={newFavoriteName}
+              onChangeText={setNewFavoriteName}
+              autoFocus
+            />
+            <Text style={styles.favoriteAddress}>{serverIP}:{serverPort}</Text>
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 20 }}>
+              <TouchableOpacity
+                style={[styles.button, { flex: 1, backgroundColor: '#999' }]}
+                onPress={() => setShowAddFavoriteModal(false)}
+              >
+                <Text style={styles.buttonText}>Annuler</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.button, { flex: 1 }, !newFavoriteName.trim() && styles.buttonDisabled]}
+                onPress={confirmAddFavorite}
+                disabled={!newFavoriteName.trim()}
+              >
+                <Text style={styles.buttonText}>Ajouter</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+
+  const renderFavoritesModal = () => (
+    <Modal
+      visible={showFavoritesModal}
+      transparent
+      animationType="fade"
+      onRequestClose={() => setShowFavoritesModal(false)}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalContent}>
+          <View style={styles.modalHeader}>
+            <Ionicons name="star" size={24} color="#FF9800" />
+            <Text style={styles.modalTitle}>Favoris</Text>
+            <TouchableOpacity onPress={() => setShowFavoritesModal(false)}>
+              <Ionicons name="close" size={24} color="#666" />
+            </TouchableOpacity>
+          </View>
+          <ScrollView style={styles.favoritesList}>
+            {favorites.length === 0 ? (
+              <Text style={styles.emptyText}>Aucun favori enregistré</Text>
+            ) : (
+              favorites.map((fav, index) => (
+                <View key={index} style={styles.favoriteItem}>
+                  <TouchableOpacity
+                    style={styles.favoriteItemMain}
+                    onPress={() => selectFavorite(fav)}
+                  >
+                    <View>
+                      <Text style={styles.favoriteName}>{fav.name}</Text>
+                      <Text style={styles.favoriteAddress}>{fav.ip}:{fav.port}</Text>
+                    </View>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.deleteButton}
+                    onPress={() => deleteFavorite(index)}
+                  >
+                    <Ionicons name="trash-outline" size={20} color="#f44336" />
+                  </TouchableOpacity>
+                </View>
+              ))
+            )}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
   );
 
   return (
     <View style={[styles.container, isLandscape && styles.containerLandscape]}>
+      {renderAddFavoriteModal()}
+      {renderFavoritesModal()}
       <View style={styles.mainContent}>
         {!connected && !connecting ? (
           isLandscape ? renderLandscapeForm() : renderPortraitForm()
@@ -438,5 +670,23 @@ const styles = StyleSheet.create({
   secondaryBtn: { backgroundColor: 'rgba(0,0,0,0.5)' },
   captureBtn: { width: 72, height: 72, borderRadius: 36, backgroundColor: '#4CAF50', elevation: 5 },
   captureBtnLandscape: { width: 64, height: 64, borderRadius: 32 },
+  captureBtnConfirm: { backgroundColor: '#2196F3' },
+  captureBtnCapturing: { backgroundColor: '#FF9800' },
+  capturingText: { color: '#fff', fontSize: 32, fontWeight: 'bold', letterSpacing: 3 },
   disconnectBtn: { backgroundColor: '#f44336' },
+  
+  // Favorites
+  favoriteButton: { flex: 1, backgroundColor: '#666', padding: 15, borderRadius: 10, alignItems: 'center', justifyContent: 'center', elevation: 2 },
+  favoriteButtonLandscape: { width: 48, height: 48, backgroundColor: '#f5f5f5', borderRadius: 12, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#ccc' },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
+  modalContent: { backgroundColor: '#fff', borderRadius: 20, width: '85%', maxHeight: '70%', padding: 20 },
+  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20, paddingBottom: 15, borderBottomWidth: 1, borderBottomColor: '#eee' },
+  modalTitle: { fontSize: 20, fontWeight: 'bold', color: '#333', flex: 1, marginLeft: 10 },
+  favoritesList: { maxHeight: 400 },
+  emptyText: { textAlign: 'center', color: '#999', fontSize: 16, paddingVertical: 30 },
+  favoriteItem: { flexDirection: 'row', backgroundColor: '#f5f5f5', borderRadius: 12, marginBottom: 10, overflow: 'hidden' },
+  favoriteItemMain: { flex: 1, padding: 15 },
+  favoriteName: { fontSize: 16, fontWeight: '600', color: '#333', marginBottom: 4 },
+  favoriteAddress: { fontSize: 14, color: '#666', fontFamily: 'monospace' },
+  deleteButton: { width: 50, alignItems: 'center', justifyContent: 'center', backgroundColor: '#ffebee' },
 });
